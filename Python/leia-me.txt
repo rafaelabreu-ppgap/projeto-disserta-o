@@ -1,0 +1,2 @@
+1. Planilha de códigos do ente e ano do anexo: arquivo "cod_reg.csv"
+2. Anexos baixados: arquivo "anexos despesas.csv"

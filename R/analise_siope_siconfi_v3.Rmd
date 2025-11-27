@@ -1,0 +1,357 @@
+---
+title: "Análise Comparativa: Gasto por Aluno (SIOPE vs. SICONFI)"
+subtitle: "Municípios Selecionados (2015-2023) - Análise por Ano"
+author: "Rafael Abreu"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: united
+    number_sections: true
+lang: pt-BR
+---
+
+```{r setup, include=FALSE}
+# Opções globais do R Markdown
+knitr::opts_chunk$set(echo = TRUE,       # Mostra o código
+                      message = FALSE,   # Oculta mensagens
+                      warning = FALSE)   # Oculta avisos
+```
+
+## 1. Configuração do Ambiente
+
+Carrega pacotes. O `tidyverse` é uma coleção de pacotes que inclui o `dplyr` (para manipulação de dados) e o `ggplot2` (para gráficos). O `knitr` e `kableExtra` ajudam a formatar tabelas.
+
+```{r carregar-pacotes, message=FALSE, warning=FALSE}
+# Instale os pacotes se ainda não os tiver
+# install.packages("tidyverse")
+# install.packages("knitr")
+# install.packages("kableExtra")
+# install.packages("patchwork")
+
+library(tidyverse)  # Pacote principal para manipulação e gráficos
+library(knitr)      # Para formatar tabelas
+library(kableExtra) # Funções extras para tabelas
+library(patchwork)
+```
+
+## 2. Carga e Preparação dos Dados
+
+```{r carregar-dados}
+dados <- readxl::read_excel("dados_mucuri.xlsx", sheet = "gasto")
+
+# Visualizar os primeiros dados
+kable(head(dados), caption = "Amostra dos Dados Carregados") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+### 2.1. Criando Campos Calculados
+
+Colunas de diferença.
+
+* `diff_abs` (Diferença Absoluta): SIOPE - SICONFI
+* `diff_perc` (Diferença Percentual): A diferença como uma porcentagem do valor do SICONFI.
+
+```{r criar-diferencas}
+dados <- dados %>%
+  mutate(
+    diff_abs = gasto_aluno_SIOPE - gasto_aluno_SICONFI,
+    diff_perc = (diff_abs / gasto_aluno_SICONFI) * 100
+  )
+
+kable(head(dados), caption = "Amostra dos Dados com Campos Calculados") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+## 3. Análise Descritiva Geral (Período Completo 2015-2023)
+
+Esta seção fornece um resumo de todo o conjunto de dados, antes de quebrá-lo por ano.
+
+```{r estatisticas-gerais}
+# Gasto e diferença
+estatisticas_gerais <- dados %>%
+  select(gasto_aluno_SIOPE, gasto_aluno_SICONFI, diff_abs, diff_perc) %>%
+  summary()
+
+# Sumário
+print(estatisticas_gerais)
+```
+
+```{r estatisticas-gerais-detalhada}
+dados %>%
+  summarise(
+    Fonte = "Geral",
+    Media_SIOPE = mean(gasto_aluno_SIOPE, na.rm = TRUE),
+    Media_SICONFI = mean(gasto_aluno_SICONFI, na.rm = TRUE),
+    Media_Diff_Abs = mean(diff_abs, na.rm = TRUE),
+    SD_Diff_Abs = sd(diff_abs, na.rm = TRUE),
+    Media_Diff_Perc = mean(diff_perc, na.rm = TRUE),
+    SD_Diff_Perc = sd(diff_perc, na.rm = TRUE)
+  ) %>%
+  kable(caption = "Estatísticas Descritivas Gerais (2015-2023)", digits = 2) %>%
+  kable_styling(bootstrap_options = "striped", full_width = T)
+```
+
+### 3.1. Visualização: Histogramas de Densidade
+
+```{r grafico-densidade-diferenca, fig.width=10, fig.height=4}
+# Gráfico para a Diferença Absoluta
+p1 <- ggplot(dados, aes(x = diff_abs)) +
+  geom_density(fill = "steelblue", alpha = 0.7) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+  geom_vline(aes(xintercept = mean(diff_abs)), linetype = "dotted", color = "black", linewidth = 1) +
+  labs(title = "Distribuição da Diferença Absoluta (SIOPE - SICONFI)",
+       subtitle = "Linha vermelha = 0; Linha preta pontilhada = Média",
+       x = "Diferença Absoluta (R$)", y = "Densidade") +
+  theme_minimal()
+
+# Gráfico para a Diferença Percentual
+p2 <- ggplot(dados, aes(x = diff_perc)) +
+  geom_density(fill = "coral", alpha = 0.7) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+  geom_vline(aes(xintercept = mean(diff_perc)), linetype = "dotted", color = "black", linewidth = 1) +
+  labs(title = "Distribuição da Diferença % (SIOPE - SICONFI)",
+       subtitle = "Linha vermelha = 0; Linha preta pontilhada = Média",
+       x = "Diferença Percentual (%)", y = "Densidade") +
+  theme_minimal()
+
+p1 + p2
+```
+
+### 3.2. Visualização: Boxplots (Resumo Estatístico)
+
+```{r graficos-descritivos-boxplots, fig.width=10, fig.height=5}
+# --- GRÁFICO 1: Boxplot dos Níveis de Gasto ---
+dados_long_gasto <- dados %>%
+  select(gasto_aluno_SIOPE, gasto_aluno_SICONFI) %>%
+  pivot_longer(
+    cols = c(gasto_aluno_SIOPE, gasto_aluno_SICONFI),
+    names_to = "Fonte",
+    values_to = "Gasto_por_Aluno"
+  )
+
+b1 <- ggplot(dados_long_gasto, aes(x = Fonte, y = Gasto_por_Aluno, fill = Fonte)) +
+  geom_boxplot(alpha = 0.8) +
+  scale_fill_manual(values = c("gasto_aluno_SIOPE" = "steelblue", "gasto_aluno_SICONFI" = "coral")) +
+  labs(title = "Distribuição dos Gastos por Aluno (SIOPE vs. SICONFI)",
+       x = "Fonte de Dados",
+       y = "Gasto por Aluno (R$)") +
+  theme_light() +
+  theme(legend.position = "none")
+
+# --- GRÁFICO 2: Boxplot das Diferenças ---
+dados_long_diff <- dados %>%
+  select(diff_abs, diff_perc) %>%
+  pivot_longer(
+    cols = c(diff_abs, diff_perc),
+    names_to = "Metrica_Diferenca",
+    values_to = "Valor"
+  )
+
+b2 <- ggplot(dados_long_diff, aes(x = Metrica_Diferenca, y = Valor, fill = Metrica_Diferenca)) +
+  geom_boxplot(alpha = 0.8, show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+  facet_wrap(~ Metrica_Diferenca, scales = "free") + 
+  scale_fill_manual(values = c("diff_abs" = "darkgreen", "diff_perc" = "purple")) +
+  labs(title = "Distribuição das Diferenças (Absoluta e Percentual)",
+       x = "Métrica de Diferença",
+       y = "Valor") +
+  theme_light()
+
+b1 + b2
+```
+
+### 3.3. Visualização: Outras Comparações (ECDF)
+
+```{r grafico-descritivo-ecdf, fig.width=8, fig.height=5}
+ggplot(dados_long_gasto, aes(x = Gasto_por_Aluno, color = Fonte)) +
+  stat_ecdf(linewidth = 1.2) + 
+  scale_color_manual(values = c("gasto_aluno_SIOPE" = "steelblue", "gasto_aluno_SICONFI" = "coral")) +
+  labs(
+    title = "Comparação das Distribuições de Gasto (ECDF) - Geral",
+    subtitle = "O gráfico mostra a % de observações abaixo de um certo valor de gasto.",
+    x = "Gasto por Aluno (R$)",
+    y = "Proporção Cumulativa (0 a 1)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+---
+
+## 4. Análise Descritiva por Ano
+
+Esta é a seção central da nova análise. Aqui, quebramos as estatísticas descritivas por **ano** para ver a evolução.
+
+### 4.1. Tabela por Ano
+
+```{r tabela-por-ano}
+analise_ano <- dados %>%
+  group_by(ano) %>%
+  summarise(
+    N_Obs = n(),
+    Media_SIOPE = mean(gasto_aluno_SIOPE, na.rm = TRUE),
+    Media_SICONFI = mean(gasto_aluno_SICONFI, na.rm = TRUE),
+    Media_Diff_Abs = mean(diff_abs, na.rm = TRUE),
+    SD_Diff_Abs = sd(diff_abs, na.rm = TRUE),
+    Media_Diff_Perc = mean(diff_perc, na.rm = TRUE)
+  ) %>%
+  arrange(ano)
+
+kable(analise_ano, 
+      caption = "Análise da Diferença Média por Ano", 
+      digits = 2) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+### 4.2. Gráfico: Boxplot por Ano (Diferença Absoluta)
+
+Isto mostra como a *distribuição* da diferença absoluta mudou ano a ano (visualização da tabela `summary()`).
+
+```{r grafico-boxplot-ano, fig.width=10, fig.height=6}
+ggplot(dados, aes(x = factor(ano), y = diff_abs, fill = factor(ano))) +
+  geom_boxplot(show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") + 
+  labs(
+    title = "Distribuição da Diferença Absoluta (SIOPE - SICONFI) por Ano",
+    subtitle = "Agrupado por Ano (2015-2023)",
+    x = "Ano",
+    y = "Diferença Absoluta (R$)"
+  ) +
+  theme_light()
+```
+
+### 4.3. Gráfico: Violino por Ano (Diferença Percentual)
+
+Isto mostra como a *forma* da distribuição da diferença percentual mudou ano a ano.
+
+```{r grafico-violin-ano, fig.width=10, fig.height=6}
+ggplot(dados, aes(x = factor(ano), y = diff_perc, fill = factor(ano))) +
+  geom_violin(trim = FALSE, show.legend = FALSE) +
+  geom_boxplot(width = 0.1, fill = "white", show.legend = FALSE) + 
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Distribuição da Diferença Percentual (SIOPE - SICONFI) por Ano",
+    subtitle = "Agrupado por Ano (2015-2023)",
+    x = "Ano",
+    y = "Diferença Percentual (%)"
+  ) +
+  theme_light()
+```
+
+### 4.4. Gráfico: ECDF por Ano
+
+Este é um gráfico poderoso que mostra como a *relação* entre as distribuições SIOPE e SICONFI mudou a cada ano.
+
+```{r grafico-ecdf-ano, fig.width=12, fig.height=9}
+# Precisamos do 'dados_long' que foi criado na Seção 3.2
+dados_long_completo <- dados %>%
+  pivot_longer(
+    cols = c(gasto_aluno_SIOPE, gasto_aluno_SICONFI),
+    names_to = "Fonte",
+    values_to = "Gasto_por_Aluno"
+  )
+
+ggplot(dados_long_completo, aes(x = Gasto_por_Aluno, color = Fonte)) +
+  stat_ecdf(linewidth = 1) + 
+  facet_wrap(~ ano, ncol = 3) +
+  scale_color_manual(values = c("gasto_aluno_SIOPE" = "steelblue", "gasto_aluno_SICONFI" = "coral")) +
+  labs(
+    title = "Evolução da Comparação das Distribuições de Gasto (ECDF) por Ano",
+    subtitle = "Observe como a distância entre as curvas azul (SIOPE) e vermelha (SICONFI) muda ao longo dos anos.",
+    x = "Gasto por Aluno (R$)",
+    y = "Proporção Cumulativa (0 a 1)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        strip.text = element_text(face = "bold"))
+```
+
+---
+
+## 5. Análise por Município e Ano
+
+Esta seção cumpre sua nova solicitação de ver o "gráfico de gap por município para cada ano".
+
+### 5.1. Gráfico: "Gap" por Município, Facetado por Ano (Dumbbell Plot)
+
+Este gráfico mostra o gasto de SIOPE vs. SICONFI para todos os 13 municípios, com um painel separado para cada ano.
+
+```{r grafico-dumbbell-municipio-ano, fig.width=12, fig.height=15}
+ggplot(dados, aes(y = fct_reorder(nom_munic, gasto_aluno_SIOPE, .fun = mean), 
+                   x = gasto_aluno_SICONFI, xend = gasto_aluno_SIOPE)) +
+  geom_segment(aes(yend = fct_reorder(nom_munic, gasto_aluno_SIOPE, .fun = mean)), 
+               color = "grey", linewidth = 1, alpha = 0.7) + 
+  geom_point(aes(color = "SICONFI"), size = 2.5, alpha = 0.8) +
+  geom_point(aes(x = gasto_aluno_SIOPE, color = "SIOPE"), size = 2.5, alpha = 0.8) +
+  # Agrupa por ano em 3 colunas
+  facet_wrap(~ ano, ncol = 3) +
+  scale_color_manual(values = c("SIOPE" = "steelblue", "SICONFI" = "coral")) +
+  labs(
+    title = "Gap Anual do Gasto por Aluno (SIOPE vs. SICONFI)",
+    subtitle = "Comparação lado a lado para cada município, por ano.",
+    x = "Gasto por Aluno (R$)",
+    y = "Município",
+    color = "Fonte de Dados"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        # Texto do eixo Y menor para caber nos 13 municípios por painel
+        axis.text.y = element_text(size = 7),
+        strip.text = element_text(face = "bold"))
+```
+
+## 6. Análise por Município (Série Temporal)
+
+Esta seção foi mantida conforme sua solicitação. Ela mostra a mesma informação da seção anterior, mas com o eixo X sendo o tempo (útil para ver a *tendência* de cada município).
+
+### 6.1. Gráfico: Séries Temporais (Nível de Gasto)
+
+```{r grafico-facetado-municipio, fig.width=12, fig.height=9}
+ggplot(dados_long_completo, aes(x = ano, y = Gasto_por_Aluno, color = Fonte, group = Fonte)) +
+  geom_line(linewidth = 1) +
+  geom_point() +
+  geom_smooth(method = "lm", linetype = "dotted", se = FALSE, linewidth = 0.8) +
+  facet_wrap(~ nom_munic, scales = "free_y", ncol = 4) +
+  labs(
+    title = "Comparação Gasto por Aluno (SIOPE vs. SICONFI) por Município",
+    subtitle = "Período: 2015-2023",
+    x = "Ano",
+    y = "Gasto por Aluno (R$)",
+    color = "Fonte de Dados"
+  ) +
+  scale_x_continuous(breaks = seq(2015, 2023, by = 2)) +
+  theme_bw() + # Tema limpo
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(size = 8, face = "bold"), 
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+### 6.2. Gráfico: Séries Temporais (Diferença Percentual)
+
+O gráfico abaixo foca em plotar a `diff_perc` ao longo do tempo.
+
+```{r grafico-facetado-diferenca, fig.width=12, fig.height=9}
+ggplot(dados, aes(x = ano, y = diff_perc)) +
+  geom_line(color = "darkgreen", linewidth = 1) +
+  geom_point(color = "darkgreen") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  facet_wrap(~ nom_munic, ncol = 4) +
+  labs(
+    title = "Evolução da Diferença Percentual (SIOPE - SICONFI) / SICONFI",
+    subtitle = "Período: 2015-2023. Linha vermelha = 0% de diferença.",
+    x = "Ano",
+    y = "Diferença Percentual (%)"
+  ) +
+  scale_x_continuous(breaks = seq(2015, 2023, by = 2)) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 8, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+---

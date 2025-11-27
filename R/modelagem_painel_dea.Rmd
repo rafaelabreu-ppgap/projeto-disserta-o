@@ -1,0 +1,1478 @@
+---
+title: "Modelagem"
+subtitle: "Modelos de Regressao em Painel e Analise DEA (SIOPE vs. SICONFI)"
+author: "Rafael Abreu"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    number_sections: false
+lang: pt-BR
+---
+
+```{r setup, include=FALSE}
+# Opções globais do R Markdown
+knitr::opts_chunk$set(
+  echo = TRUE,       # Mostra o código-fonte
+  message = FALSE,   # Oculta mensagens
+  warning = FALSE,   # Oculta avisos
+  eval = TRUE        # ATENÇÃO: Mude para FALSE se quiser apenas "tricotar" o 
+                     # relatório sem rodar as análises (ex: para editar texto)
+)
+
+# Pacote para formatar tabelas
+library(knitr)
+```
+
+## 1. Configuração do Ambiente
+
+### 1.1. Instalação de Pacotes (Apenas se necessário)
+
+Este bloco não é executado (`eval=FALSE`). Se você ainda não tem os pacotes, copie e cole estas linhas no seu **Console** do RStudio para instalá-los.
+
+```{r install-packages, eval=FALSE}
+# Lista de pacotes para a análise
+pacotes_necessarios <- c(
+  "readxl",               # para ler arquivos excel
+  "dplyr",                # para manipulação de dados
+  "plm",                  # para análise de dados em painel
+  "lmtest",               # testes para modelos de regressão
+  "zoo",                  # para séries temporais e janelas móveis
+  "PerformanceAnalytics", # análise exploratória
+  "tseries",              # para séries temporais: análise de tendência, etc.
+  "tidyverse",            # para manipulação de dados
+  "gtsummary",            # para melhor visualização de tabelas
+  "ggrepel",              # para gráficos
+  "deaR",                 # para Análise de Envoltória de Dados
+  "broom",                # para melhor visualização de análises estatísticas
+  "broom.helpers",
+  "litedown",
+  "patchwork",
+  "glue",
+  "kebleExtra",
+  "ggraph",
+  "tidygraph"
+  "knitr"
+  "ggplot2"
+)
+
+install.packages(pacotes_necessarios)
+```
+
+### 1.2. Carregamento dos Pacotes
+
+Aqui carregamos todas as bibliotecas que serão usadas no relatório.
+
+```{r load-packages}
+library(readxl)
+library(dplyr)
+library(plm)
+library(lmtest)
+library(zoo)
+library(tidyverse)
+library(gtsummary)
+library(deaR)
+library(ggrepel)
+library(broom)
+library(broom.helpers)
+library(litedown)
+library(patchwork)
+library(glue)
+library(kableExtra)
+library(ggraph)
+library(tidygraph)
+library(knitr)
+library(ggplot2)
+```
+
+## 2. Carga e Preparação dos Dados
+
+Primeiro, lemos as duas abas da planilha "dados_mucuri.xlsx" e as unimos usando as chaves `ano`, `id_ente` e `nom_munic`.
+
+```{r load-data}
+dados_qualidade <- read_excel("dados_mucuri.xlsx", sheet = "qualidade")
+dados_gastos <- read_excel("dados_mucuri.xlsx", sheet = "gasto")
+
+dados_completos <- left_join(dados_gastos, dados_qualidade, by = c("ano", "id_ente", "nom_munic"))
+
+# Usamos glimpse() para uma visualização rápida da estrutura dos dados
+glimpse(dados_completos)
+```
+
+## 3. Criação do Índice Sintético de Qualidade (PCA)
+
+Para criar uma variável dependente única, aplicamos a Análise de Componentes Principais (PCA) sobre os indicadores de proficiência adequada em Português (`lp_adequado`) e Matemática (`mt_adequado`).
+
+```{r pca-analysis}
+# Seleciona e padroniza as colunas para o PCA
+matriz_pca <- dados_qualidade %>%
+  dplyr::select(lp_adequado, mt_adequado) %>%
+  scale()
+
+# Executa o PCA
+pca_resultado <- prcomp(matriz_pca)
+
+# Verifica a variância explicada pelo primeiro componente
+print(summary(pca_resultado))
+
+# Extrai o primeiro componente principal (PC1) como nosso índice
+dados_qualidade$indice_qualidade <- pca_resultado$x[, 1]
+
+# ----- GRÁFICO 1: PCA -----
+# Este gráfico mostra a importância de cada componente.
+
+# Extrai a importância
+pca_importancia <- as.data.frame(t(summary(pca_resultado)$importance))
+pca_importancia$componente <- rownames(pca_importancia)
+
+ggplot(pca_importancia, aes(x = componente, y = `Proportion of Variance`)) +
+  geom_col(fill = "steelblue", color = "black") +
+  geom_line(aes(y = `Cumulative Proportion`, group = 1), color = "red", linewidth = 1) +
+  geom_point(aes(y = `Cumulative Proportion`), color = "red", size = 3) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Análise de Componentes Principais (PCA)",
+    subtitle = "Justificativa para uso do PC1 como Índice Sintético",
+    x = "Componente Principal",
+    y = "Proporção da Variância Explicada"
+  ) +
+  theme_bw()
+```
+
+Após criar o índice, nós o adicionamos à base completa e removemos as colunas originais (`lp_adequado`, `mt_adequado`) e objetos desnecessários.
+
+```{r pca-join}
+# Adiciona índice sintético ao painel com todos os dados
+dados_completos <- dados_completos %>%
+  left_join(dados_qualidade %>% dplyr::select(ano, id_ente, indice_qualidade), by = c("ano", "id_ente"))
+
+# Limpa variáveis
+rm(matriz_pca)
+dados_completos$lp_adequado <- NULL
+dados_completos$mt_adequado <- NULL
+```
+
+## 4. Engenharia de Variáveis (Construção do Painel)
+
+```{r feature-engineering}
+painel <- dados_completos %>%
+  dplyr::arrange(id_ente, ano) %>%
+  dplyr::group_by(id_ente) %>%
+  dplyr::mutate(
+    # Padroniza o índice de qualidade
+    #indice_qualidade_std = as.vector(scale(indice_qualidade)),
+    indice_qualidade_std = as.vector(indice_qualidade),
+    
+    # Aplica o logaritmo no investimento
+    log_gasto_siope = log(gasto_aluno_SIOPE),
+    log_gasto_siconfi = log(gasto_aluno_SICONFI),
+    
+    #--- Variáveis para a Abordagem 1 (Defasagens Distribuídas) ---
+    # Primeira diferença do investimento
+    d_log_gasto_siope = log_gasto_siope - dplyr::lag(log_gasto_siope),
+    d_log_gasto_siconfi = log_gasto_siconfi - dplyr::lag(log_gasto_siconfi),
+    
+    #--- Variáveis para a Abordagem 2 (Gasto Acumulado) ---
+    # Média móvel de 3 anos do investimento EM NÍVEL
+    media_movel_3a_siope = zoo::rollmean(log_gasto_siope, k = 3, fill = NA, align = "right"),
+    media_movel_3a_siconfi = zoo::rollmean(log_gasto_siconfi, k = 3, fill = NA, align = "right")
+  ) %>%
+  dplyr::ungroup()
+```
+
+```{r grafico2}
+# ----- GRÁFICO 2: EVOLUÇÃO DO ÍNDICE DE PROFICIÊNCIA (Variável Dependente) -----
+ggplot(painel, aes(x = ano, y = indice_qualidade_std)) +
+  geom_line(color = "darkblue", linewidth = 1, linetype = "dotted") + 
+  geom_point(color = "darkblue", size = 2.5) +
+  facet_wrap(~ nom_munic, scales = "free_y", ncol = 4) +
+  
+  # --- AJUSTE SOLICITADO ---
+  # Força o eixo X a mostrar apenas os anos de medição
+  scale_x_continuous(breaks = c(2017, 2019, 2023)) +
+  
+  labs(
+    title = "Evolução do Índice de Proficiência (Padronizado) por Município",
+    subtitle = "Variável dependente (Y) dos modelos de regressão",
+    x = "Ano da Medição do Indicador de Qualidade", # Rótulo mais preciso
+    y = "Índice de Qualidade (Score Z)"
+  ) +
+  theme_bw() +
+  theme(strip.text = element_text(size = 8, face = "bold"))
+```
+
+```{r grafico-indice-qualidade, fig.width=12, fig.height=9}
+# ----- GRÁFICO 3: Evolução do Índice Sintético de Qualidade por Município -----
+# Este gráfico plota o 'indice_qualidade' (PC1).
+
+ggplot(dados_completos, aes(x = ano, y = -indice_qualidade)) +
+  # Usamos geom_line() para conectar os pontos e geom_point() para marcá-los
+  # A linha irá "quebrar" automaticamente onde há dados faltantes (NA)
+  geom_line(color = "darkblue", linewidth = 1, na.rm = TRUE) +
+  geom_point(color = "darkblue", size = 2.5, na.rm = TRUE) +
+  
+  # O pedido central: um painel por município
+  facet_wrap(~ nom_munic, scales = "free_y", ncol = 4) + 
+  
+  # Ajusta o eixo X para mostrar todos os anos, 
+  # deixando claros os "gaps" de dados
+  scale_x_continuous(breaks = seq(min(dados_completos$ano), max(dados_completos$ano), by = 2)) +
+  
+  labs(
+    title = "Evolução do Índice Sintético de Qualidade (PC1) por Município",
+    subtitle = "'Quebras' na linha indicam anos sem dados de proficiência (ex: 2018, 2020-2022)",
+    x = "Ano",
+    y = "Índice Sintético de Qualidade (Score PC1)"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 8, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+```{r plot-painel-1, fig.width=14, fig.height=10}
+# ----- GRÁFICO 4: Evolução dos Índices de Adequação (LP e MT) por Município -----
+dados_dea <- read_excel("dados_mucuri.xlsx", sheet = "malmquist_data")
+# 1. Preparar os dados (Pivotar apenas as taxas)
+# (Assumindo que 'dados_dea' já foi carregado)
+dados_taxas_long <- dados_dea %>%
+  pivot_longer(
+    cols = c("lp_adequado", "mt_adequado"),
+    names_to = "Tipo_Taxa",
+    values_to = "Taxa"
+  )
+
+# 2. Plotar o gráfico
+ggplot(dados_taxas_long, aes(x = ano, y = Taxa, color = Tipo_Taxa, group = Tipo_Taxa)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  
+  # Cria um gráfico para cada município
+  facet_wrap(~ nom_munic, ncol = 4, scales = "free_y") + 
+  
+  scale_color_manual(values = c("lp_adequado" = "darkgreen", "mt_adequado" = "purple")) +
+  
+  labs(
+    title = "Evolução das Taxas de Adequação (Outputs) por Município",
+    x = "Ano",
+    y = "Taxa de Adequação",
+    color = "Indicador:"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold")
+  )
+```
+
+```{r plot-painel-2, fig.width=14, fig.height=10}
+# ----- GRÁFICO 5: Evolução dos Índices de Adequação (LP e MT) e gasto por Município -----
+# 1. Padronizar APENAS as colunas de taxas
+dados_padronizados_prep <- dados_dea %>%
+  group_by(nom_munic) %>%
+  mutate(
+    # Aplica scale() (padronização Z) apenas nas taxas
+    lp_adequado_std = as.vector(scale(lp_adequado)),
+    mt_adequado_std = as.vector(scale(mt_adequado))
+  ) %>%
+  ungroup()
+
+# 2. Pivotar TUDO (agora que todos estão na mesma escala)
+dados_padronizados <- dados_padronizados_prep %>%
+  pivot_longer(
+    # Seleciona as colunas de gasto (já prontas) e as novas colunas _std
+    cols = c("gasto_med_3A_SIOPE", "gasto_med_3A_SICONFI", "lp_adequado_std", "mt_adequado_std"),
+    names_to = "Variavel",
+    values_to = "Valor_Padronizado"
+  ) %>%
+  
+  # 3. Criar colunas de ajuda para o plot
+  mutate(
+    # Agrupa em "Gasto" ou "Taxa"
+    Tipo_Grupo = ifelse(str_detect(Variavel, "gasto"), "Gasto", "Taxa"),
+    
+    # Define o tipo de linha (sólida ou pontilhada)
+    Tipo_Linha = ifelse(Tipo_Grupo == "Gasto", "Pontilhada", "Sólida")
+  )
+
+# 4. Plotar o gráfico
+ggplot(dados_padronizados, 
+       aes(x = ano, 
+           y = Valor_Padronizado, 
+           color = Variavel, 
+           linetype = Tipo_Linha, 
+           group = Variavel)) +
+  
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  
+  # Linha de referência no 0 (a média histórica de cada variável)
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
+  
+  # Cria um gráfico para cada município
+  facet_wrap(~ nom_munic, ncol = 4) + 
+  
+  # Define os tipos de linha manualmente
+  scale_linetype_manual(values = c("Sólida" = "solid", "Pontilhada" = "dotted")) +
+  
+  # Define cores e rótulos
+  scale_color_manual(
+    values = c(
+      "lp_adequado_std" = "darkgreen", 
+      "mt_adequado_std" = "purple",
+      "gasto_med_3A_SIOPE" = "steelblue",
+      "gasto_med_3A_SICONFI" = "coral"
+    ),
+    labels = c(
+      "lp_adequado_std" = "LP Adequado (Taxa)", 
+      "mt_adequado_std" = "MT Adequado (Taxa)",
+      "gasto_med_3A_SIOPE" = "Gasto SIOPE (Gasto)",
+      "gasto_med_3A_SICONFI" = "Gasto SICONFI (Gasto)"
+    )
+  ) +
+  
+  labs(
+    title = "Evolução Padronizada: Taxas (Linha Sólida) vs. Gastos (Linha Pontilhada)",
+    subtitle = "Valores são padronizados (Score-Z) para cada município e variável.",
+    x = "Ano",
+    y = "Valor Padronizado (Score-Z)",
+    color = "Indicador:",
+    linetype = "Tipo de Indicador"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold")
+  )
+```
+
+## 5. Modelagem: Regressão em Painel
+
+Agora, estimamos os modelos de Efeitos Fixos (FE) e Efeitos Aleatórios (RE) e usamos o Teste de Hausman para selecionar o mais adequado.
+
+### 5.1. Abordagem 1 (Lags) - SIOPE
+
+```{r modelo1-siope-prep}
+# Prepara dados para o modelo 1 (SIOPE)
+modelo1_dados_siope <- painel %>%
+  dplyr::group_by(id_ente) %>%
+  dplyr::mutate(
+    # Cria os lags da variável em diferença
+    lag1_d_log_gasto_siope = dplyr::lag(d_log_gasto_siope, 1),
+    lag2_d_log_gasto_siope = dplyr::lag(d_log_gasto_siope, 2)
+  ) %>%
+  dplyr::ungroup() %>%
+  # Filtra para os anos com dados de qualidade e sem NAs dos lags
+  dplyr::filter(!is.na(indice_qualidade_std)) %>%
+  na.omit()
+```
+
+```{r modelo1-siope-run}
+# Estima os modelos FE e RE
+fe_modelo1_siope <- plm(indice_qualidade_std ~ d_log_gasto_siope + lag1_d_log_gasto_siope + lag2_d_log_gasto_siope, data = modelo1_dados_siope, model = "within")
+
+#re_modelo1_siope <- plm(indice_qualidade_std ~ d_log_gasto_siope + lag1_d_log_gasto_siope + #lag2_d_log_gasto_siope, data = modelo1_dados_siope, model = "random")
+
+# Teste de Hausman
+#print(phtest(fe_modelo1_siope, re_modelo1_siope))
+
+# Resultado do modelo escolhido (geralmente Efeitos Fixos - FE)
+summary(fe_modelo1_siope)
+tbl_regression(fe_modelo1_siope)
+```
+
+### 5.2. Abordagem 1 (Lags) - SICONFI
+
+```{r modelo1-siconfi-prep}
+# Prepara dados para o modelo 1 (SICONFI)
+modelo1_dados_siconfi <- painel %>%
+  dplyr::group_by(id_ente) %>%
+  dplyr::mutate(
+    # Cria os lags da variável em diferença
+    lag1_d_log_gasto_siconfi = dplyr::lag(d_log_gasto_siconfi, 1),
+    lag2_d_log_gasto_siconfi = dplyr::lag(d_log_gasto_siconfi, 2)
+  ) %>%
+  dplyr::ungroup() %>%
+  # Filtra para os anos com dados de qualidade e sem NAs dos lags
+  dplyr::filter(!is.na(indice_qualidade_std)) %>%
+  na.omit()
+```
+
+```{r modelo1-siconfi-run}
+# Estima os modelos FE e RE
+fe_modelo1_siconfi <- plm(indice_qualidade_std ~ d_log_gasto_siconfi + lag1_d_log_gasto_siconfi + lag2_d_log_gasto_siconfi, data = modelo1_dados_siconfi, model = "within")
+
+#re_modelo1_siconfi <- plm(indice_qualidade_std ~ d_log_gasto_siconfi + lag1_d_log_gasto_siconfi #+ lag2_d_log_gasto_siconfi, data = modelo1_dados_siconfi, model = "random")
+
+# Teste de Hausman
+#print(phtest(fe_modelo1_siconfi, re_modelo1_siconfi))
+
+# Resultado do modelo escolhido
+summary(fe_modelo1_siconfi)
+tbl_regression(fe_modelo1_siconfi)
+```
+
+### 5.3. Abordagem 2 (Média Móvel) - SIOPE
+
+```{r modelo2-siope-prep}
+modelo2_dados_siope <- painel %>%
+  # Filtra para os anos com dados de qualidade e sem NAs da média móvel
+  dplyr::filter(!is.na(indice_qualidade_std)) %>%
+  na.omit()
+```
+
+```{r modelo2-siope-run}
+# Estima os modelos FE e RE
+fe_modelo2_siope <- plm(indice_qualidade_std ~ media_movel_3a_siope,
+                      data = modelo2_dados_siope, model = "within")
+
+re_modelo2_siope <- plm(indice_qualidade_std ~ media_movel_3a_siope,
+                      data = modelo2_dados_siope, model = "random")
+
+# Teste de Hausman
+print(phtest(fe_modelo2_siope, re_modelo2_siope))
+
+# Resultado do modelo escolhido
+summary(re_modelo2_siope)
+tbl_regression(re_modelo2_siope)
+```
+
+### 5.4. Abordagem 2 (Média Móvel) - SICONFI
+
+```{r modelo2-siconfi-prep}
+modelo2_dados_siconfi <- painel %>%
+  # Filtra para os anos com dados de qualidade e sem NAs da média móvel
+  dplyr::filter(!is.na(indice_qualidade_std)) %>%
+  na.omit()
+```
+
+```{r modelo2-siconfi-run}
+# Estima os modelos FE e RE
+fe_modelo2_siconfi <- plm(indice_qualidade_std ~ media_movel_3a_siconfi,
+                        data = modelo2_dados_siconfi, model = "within")
+
+re_modelo2_siconfi <- plm(indice_qualidade_std ~ media_movel_3a_siconfi,
+                        data = modelo2_dados_siconfi, model = "random")
+
+# Teste de Hausman
+print(phtest(fe_modelo2_siconfi, re_modelo2_siconfi))
+
+# Resultado do modelo escolhido
+summary(re_modelo2_siconfi)
+tbl_regression(re_modelo2_siconfi)
+```
+
+Ah, sim! Este é um erro de sintaxe do pacote glue. Peço desculpas por isso.
+
+O seu stack trace (o log de erro) está 100% correto. O glue está se confundindo ao tentar analisar (fazer o "parse") de um nome de variável complexo como glance_m1_siope\$r.squared e, ao mesmo tempo, aplicar uma formatação (:.3f) dentro das chaves {}.
+
+A Solução (A Forma Mais Segura) A forma mais robusta de consertar isso é fazer a formatação do texto antes de passá-lo para o glue. Vamos usar a função base do R sprintf() para criar as strings de texto formatadas e, em seguida, usaremos o glue() apenas para juntá-las.
+
+Isso evita qualquer erro de análise do glue.
+
+Bloco grafico3 Corrigido Substitua todo o seu bloco grafico3 por este código atualizado. A mudança principal está na ETAPA 3.
+
+R
+
+Entendido! Sim, essa é uma ideia muito melhor e mais limpa.
+
+Sua intuição está correta. O problema de sobreposição (image_2c715b.png) acontece porque estávamos tentando "espremer" duas camadas de informação (SIOPE e SICONFI) no mesmo painel.
+
+Ao criar 4 painéis (2 modelos x 2 fontes), cada conjunto de estatísticas (R², Obs, etc.) terá seu próprio "quadro", eliminando completamente a sobreposição.
+
+Eu modifiquei o seu código. As mudanças são:
+
+facet_wrap(): Mudei de facet_wrap(\~ Abordagem, ...) para facet_wrap(\~ Abordagem + Fonte, ...). Isso diz ao ggplot para criar uma grade 2x2.
+
+geom_text(data = stats_labels, ...): Simplifiquei esta camada.
+
+Removi a cor (aes(color = Fonte)) do texto, pois a fonte agora está no título do painel. O texto será preto.
+
+Removi o vjust = ifelse(...), pois não precisamos mais "empurrar" um texto para baixo.
+
+scale_color_manual(): Adicionei as cores "SICONFI" (vermelho) e "SIOPE" (azul) que você estava usando, para que os pontos e linhas mantenham a cor (o que é bom para consistência).
+
+Bloco grafico3 Corrigido (com 4 Painéis) Substitua o seu bloco grafico3 por este.
+
+R
+
+```{r grafico3, fig.width=10, fig.height=8}
+# ----- GRÁFICO 3: COMPARAÇÃO DOS COEFICIENTES DA REGRESSÃO -----
+# (Otimização: Este código assume que os objetos 'fe_modelo1_siope',
+# 'fe_modelo1_siconfi', 're_modelo2_siope' e 're_modelo2_siconfi'
+# já foram criados nos blocos anteriores)
+
+# --- ETAPA 1: Extrair estatísticas dos COEFICIENTES ---
+tidy_m1_siope <- broom::tidy(fe_modelo1_siope, conf.int = TRUE) %>% 
+  mutate(Fonte = "SIOPE", Abordagem = "Lags (FE)")
+tidy_m1_siconfi <- broom::tidy(fe_modelo1_siconfi, conf.int = TRUE) %>% 
+  mutate(Fonte = "SICONFI", Abordagem = "Lags (FE)")
+tidy_m2_siope <- broom::tidy(re_modelo2_siope, conf.int = TRUE) %>% 
+  mutate(Fonte = "SIOPE", Abordagem = "Média Móvel (RE)")
+tidy_m2_siconfi <- broom::tidy(re_modelo2_siconfi, conf.int = TRUE) %>% 
+  mutate(Fonte = "SICONFI", Abordagem = "Média Móvel (RE)")
+
+modelos_combinados <- bind_rows(tidy_m1_siope, tidy_m1_siconfi, tidy_m2_siope, tidy_m2_siconfi)
+
+# --- ETAPA 2: Extrair estatísticas dos MODELOS (R², etc.) ---
+glance_m1_siope <- broom::glance(fe_modelo1_siope) %>% mutate(Fonte = "SIOPE", Abordagem = "Lags (FE)")
+glance_m1_siconfi <- broom::glance(fe_modelo1_siconfi) %>% mutate(Fonte = "SICONFI", Abordagem = "Lags (FE)")
+glance_m2_siope <- broom::glance(re_modelo2_siope) %>% mutate(Fonte = "SIOPE", Abordagem = "Média Móvel (RE)")
+glance_m2_siconfi <- broom::glance(re_modelo2_siconfi) %>% mutate(Fonte = "SICONFI", Abordagem = "Média Móvel (RE)")
+
+# --- MUDANÇA 1: Reordenar o texto das estatísticas (Obs vem primeiro) ---
+stats_labels <- bind_rows(glance_m1_siope, glance_m1_siconfi, glance_m2_siope, glance_m2_siconfi) %>%
+  mutate(
+    label_texto = sprintf(
+      "Obs: %s\nR²: %.3f\nAdj. R²: %.3f\nF/Chi-sq: %.2f (p=%.3f)",
+      nobs, r.squared, adj.r.squared, statistic, p.value
+    )
+  )
+
+# --- ETAPA 3: Preparar dados para o plot ---
+modelos_plot <- modelos_combinados %>% 
+  filter(term != "(Intercept)") %>%
+  mutate(term = recode(term,
+                       "d_log_gasto_siope" = "Gasto (t)",
+                       "lag1_d_log_gasto_siope" = "Gasto (t-1)",
+                       "lag2_d_log_gasto_siope" = "Gasto (t-2)",
+                       "d_log_gasto_siconfi" = "Gasto (t)",
+                       "lag1_d_log_gasto_siconfi" = "Gasto (t-1)",
+                       "lag2_d_log_gasto_siconfi" = "Gasto (t-2)",
+                       "media_movel_3a_siope" = "Gasto (Média 3 anos)",
+                       "media_movel_3a_siconfi" = "Gasto (Média 3 anos)"
+                       ),
+         significancia_estrelas = case_when(
+           p.value < 0.01 ~ "***",
+           p.value < 0.05 ~ "**",
+           p.value < 0.10 ~ "*",
+           TRUE ~ ""
+         )
+  )
+
+# --- ETAPA 4: Plotar o gráfico completo (com 4 painéis e ordem ajustada) ---
+ggplot(modelos_plot, aes(x = estimate, y = fct_rev(term), color = Fonte)) +
+  
+  # Gráfico de pontos e intervalos de confiança
+  geom_pointrange(
+    aes(xmin = conf.low, xmax = conf.high), 
+    size = 0.8
+  ) +
+  
+  # --- CAMADA 1: P-VALOR (ESTRELAS) ---
+  geom_text(
+    aes(label = significancia_estrelas),
+    vjust = -0.7, 
+    color = "black",
+    size = 4,
+    show.legend = FALSE
+  ) +
+
+  # --- CAMADA 2: ESTATÍSTICAS DO MODELO (NOVO POSICIONAMENTO) ---
+  geom_text(
+    data = stats_labels,
+    aes(x = Inf, y = -Inf, label = label_texto), # Canto INFERIOR-DIREITO
+    inherit.aes = FALSE, 
+    color = "black",     
+    size = 3.5,
+    hjust = 1.05, # Alinha à direita
+    vjust = -0.1  # Alinha ao fundo
+  ) +
+  
+  # Linha de referência
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  
+  # --- MUDANÇA 2: Facetas com facet_grid() ---
+  # Isso cria a grade 2x2: Linhas = Fonte, Colunas = Abordagem
+  facet_grid(Fonte ~ Abordagem, scales = "free_y") +
+  
+  # Define as cores
+  scale_color_manual(values = c("SIOPE" = "steelblue", "SICONFI" = "firebrick")) +
+  
+  # Ajusta os limites do eixo X
+  scale_x_continuous(limits = c(-5.0, 5.0)) + 
+  
+  # Rótulos (sem acentos para evitar erros de codificação)
+  labs(
+    title = "Comparacao dos Coeficientes dos Modelos de Regressao",
+    subtitle = "Impacto do Gasto (log) no Indice de Qualidade (Std.)",
+    x = "Estimativa do Coeficiente (com Intervalo de Confianca de 95%)",
+    y = "Variavel de Gasto"
+  ) +
+  theme_bw() +
+  # Remove a legenda, pois a informação já está nos títulos das facetas (linhas)
+  theme(legend.position = "none", 
+        strip.text = element_text(size = 9, face = "bold"))
+```
+
+## 6. Análise de Envoltória de Dados (DEA)
+
+### 6.1. DEA Cross-Section (Eficiência por Ano)
+
+Aqui, calculamos a eficiência técnica (orientada ao produto, com retornos variáveis de escala) para anos específicos (2017, 2019, 2023) como "fotografias" da eficiência.
+
+#### 6.1.1. DEA por Ano - SIOPE
+
+```{r dea-load-data}
+dados_dea <- read_excel("dados_mucuri.xlsx", sheet = "malmquist_data")
+glimpse(dados_dea)
+```
+
+```{r dea-siope-prep}
+dados_2017_siope <- dados_dea %>% filter(ano == 2017)
+dados_2019_siope <- dados_dea %>% filter(ano == 2019)
+dados_2023_siope <- dados_dea %>% filter(ano == 2023)
+```
+
+```{r dea-siope-2017}
+# ANO DE 2017
+dea_2017_siope <- make_deadata(dados_2017_siope,
+                             ni = 1, no = 2, dmus = 1,
+                             inputs = 3, # coluna 3 -> SIOPE
+                             outputs = 5:6)
+modelo_dea_2017_siope <- model_basic(dea_2017_siope, orientation = "oo", rts = "vrs")
+
+# Criar e imprimir a tabela de eficiência
+resultados_dea_2017_siope <- data.frame(
+  Eficiencia = vapply(modelo_dea_2017_siope$DMU, function(x) x$efficiency, FUN.VALUE = numeric(1))
+)
+knitr::kable(resultados_dea_2017_siope, caption = "Eficiência DEA - SIOPE 2017", digits = 4)
+```
+
+```{r dea-siope-2019}
+# ANO DE 2019
+dea_2019_siope <- make_deadata(dados_2019_siope,
+                             ni = 1, no = 2, dmus = 1,
+                             inputs = 3, # coluna 3 -> SIOPE
+                             outputs = 5:6)
+modelo_dea_2019_siope <- model_basic(dea_2019_siope, orientation = "oo", rts = "vrs")
+
+# Criar e imprimir a tabela de eficiência
+resultados_dea_2019_siope <- data.frame(
+  Eficiencia = vapply(modelo_dea_2019_siope$DMU, function(x) x$efficiency, FUN.VALUE = numeric(1))
+)
+knitr::kable(resultados_dea_2019_siope, caption = "Eficiência DEA - SIOPE 2019", digits = 4)
+```
+
+```{r dea-siope-2023}
+# ANO DE 2023
+dea_2023_siope <- make_deadata(dados_2023_siope,
+                             ni = 1, no = 2, dmus = 1,
+                             inputs = 3, # coluna 3 -> SIOPE
+                             outputs = 5:6)
+modelo_dea_2023_siope <- model_basic(dea_2023_siope, orientation = "oo", rts = "vrs")
+
+# Criar e imprimir a tabela de eficiência
+resultados_dea_2023_siope <- data.frame(
+  Eficiencia = vapply(modelo_dea_2023_siope$DMU, function(x) x$efficiency, FUN.VALUE = numeric(1))
+)
+knitr::kable(resultados_dea_2023_siope, caption = "Eficiência DEA - SIOPE 2023", digits = 4)
+```
+
+#### 6.1.2. DEA por Ano - SICONFI
+
+```{r dea-siconfi-prep}
+dados_2017_siconfi <- dados_dea %>% filter(ano == 2017)
+dados_2019_siconfi <- dados_dea %>% filter(ano == 2019)
+dados_2023_siconfi <- dados_dea %>% filter(ano == 2023)
+```
+
+```{r dea-siconfi-2017}
+# ANO DE 2017
+dea_2017_siconfi <- make_deadata(dados_2017_siconfi,
+                               ni = 1, no = 2, dmus = 1,
+                               inputs = 4, # coluna 4 -> SICONFI
+                               outputs = 5:6)
+modelo_dea_2017_siconfi <- model_basic(dea_2017_siconfi, orientation = "oo", rts = "vrs")
+
+# Criar e imprimir a tabela de eficiência
+resultados_dea_2017_siconfi <- data.frame(
+  Eficiencia = vapply(modelo_dea_2017_siconfi$DMU, function(x) x$efficiency, FUN.VALUE = numeric(1))
+)
+knitr::kable(resultados_dea_2017_siconfi, caption = "Eficiência DEA - SICONFI 2017", digits = 4)
+```
+
+```{r dea-siconfi-2019}
+# ANO DE 2019
+dea_2019_siconfi <- make_deadata(dados_2019_siconfi,
+                               ni = 1, no = 2, dmus = 1,
+                               inputs = 4, # coluna 4 -> SICONFI
+                               outputs = 5:6)
+modelo_dea_2019_siconfi <- model_basic(dea_2019_siconfi, orientation = "oo", rts = "vrs")
+
+# Criar e imprimir a tabela de eficiência
+resultados_dea_2019_siconfi <- data.frame(
+  Eficiencia = vapply(modelo_dea_2019_siconfi$DMU, function(x) x$efficiency, FUN.VALUE = numeric(1))
+)
+knitr::kable(resultados_dea_2019_siconfi, caption = "Eficiência DEA - SICONFI 2019", digits = 4)
+```
+
+```{r dea-siconfi-2023}
+# ANO DE 2023
+dea_2023_siconfi <- make_deadata(dados_2023_siconfi,
+                               ni = 1, no = 2, dmus = 1,
+                               inputs = 4, # coluna 4 -> SICONFI
+                               outputs = 5:6)
+modelo_dea_2023_siconfi <- model_basic(dea_2023_siconfi, orientation = "oo", rts = "vrs")
+
+# Criar e imprimir a tabela de eficiência
+resultados_dea_2023_siconfi <- data.frame(
+  Eficiencia = vapply(modelo_dea_2023_siconfi$DMU, function(x) x$efficiency, FUN.VALUE = numeric(1))
+)
+knitr::kable(resultados_dea_2023_siconfi, caption = "Eficiência DEA - SICONFI 2023", digits = 4)
+```
+
+```{r grafico5}
+# ----- GRÁFICO 5: COMPARAÇÃO DOS SCORES DE EFICIÊNCIA (DEA) -----
+
+# 1. Roda todos os 6 modelos
+modelo_siope_17 <- model_basic(make_deadata(dados_dea %>% filter(ano == 2017), ni = 1, no = 2, dmus = 1, inputs = 3, outputs = 5:6), orientation = "oo", rts = "vrs")
+modelo_siope_19 <- model_basic(make_deadata(dados_dea %>% filter(ano == 2019), ni = 1, no = 2, dmus = 1, inputs = 3, outputs = 5:6), orientation = "oo", rts = "vrs")
+modelo_siope_23 <- model_basic(make_deadata(dados_dea %>% filter(ano == 2023), ni = 1, no = 2, dmus = 1, inputs = 3, outputs = 5:6), orientation = "oo", rts = "vrs")
+modelo_siconfi_17 <- model_basic(make_deadata(dados_dea %>% filter(ano == 2017), ni = 1, no = 2, dmus = 1, inputs = 4, outputs = 5:6), orientation = "oo", rts = "vrs")
+modelo_siconfi_19 <- model_basic(make_deadata(dados_dea %>% filter(ano == 2019), ni = 1, no = 2, dmus = 1, inputs = 4, outputs = 5:6), orientation = "oo", rts = "vrs")
+modelo_siconfi_23 <- model_basic(make_deadata(dados_dea %>% filter(ano == 2023), ni = 1, no = 2, dmus = 1, inputs = 4, outputs = 5:6), orientation = "oo", rts = "vrs")
+
+# 2. Extrai os dados e combina em uma única tabela
+res_siope_17 <- data.frame(DMU = names(modelo_siope_17$DMU), Eficiencia = vapply(modelo_siope_17$DMU, function(x) x$efficiency, FUN.VALUE = numeric(1)), Ano = 2017, Fonte = "SIOPE")
+res_siope_19 <- data.frame(DMU = names(modelo_siope_19$DMU), Eficiencia = vapply(modelo_siope_19$DMU, function(x) x$efficiency, FUN.VALUE = numeric(1)), Ano = 2019, Fonte = "SIOPE")
+res_siope_23 <- data.frame(DMU = names(modelo_siope_23$DMU), Eficiencia = vapply(modelo_siope_23$DMU, function(x) x$efficiency, FUN.VALUE = numeric(1)), Ano = 2023, Fonte = "SIOPE")
+res_siconfi_17 <- data.frame(DMU = names(modelo_siconfi_17$DMU), Eficiencia = vapply(modelo_siconfi_17$DMU, function(x) x$efficiency, FUN.VALUE = numeric(1)), Ano = 2017, Fonte = "SICONFI")
+res_siconfi_19 <- data.frame(DMU = names(modelo_siconfi_19$DMU), Eficiencia = vapply(modelo_siconfi_19$DMU, function(x) x$efficiency, FUN.VALUE = numeric(1)), Ano = 2019, Fonte = "SICONFI")
+res_siconfi_23 <- data.frame(DMU = names(modelo_siconfi_23$DMU), Eficiencia = vapply(modelo_siconfi_23$DMU, function(x) x$efficiency, FUN.VALUE = numeric(1)), Ano = 2023, Fonte = "SICONFI")
+
+dea_combinado_df <- bind_rows(res_siope_17, res_siope_19, res_siope_23, res_siconfi_17, res_siconfi_19, res_siconfi_23)
+
+# --- LÓGICA DE OUTLIER (LIMITE = 10) ---
+dea_combinado_df <- dea_combinado_df %>%
+  mutate(
+    Grupo = ifelse(Eficiencia > 10,
+                   "Outliers (Escala Alta)", 
+                   "Inliers (Escala Normal)")
+  )
+
+# 3. Plota o gráfico
+ggplot(dea_combinado_df, aes(x = DMU, y = Eficiencia, fill = Fonte)) +
+  geom_col(position = "dodge") +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  
+  # --- CORREÇÃO: VOLTANDO PARA facet_wrap ---
+  # Isso cria 4 painéis, mas remove os que estão vazios.
+  # O importante é que scales = "free" permite que CADA painel
+  # tenha seus próprios eixos, mostrando os Inliers de 2019.
+  facet_wrap(Grupo ~ Ano, scales = "free", ncol = 2) + 
+  
+  coord_flip() + # Vira o gráfico
+  
+  # Labs (sem acentos)
+  labs(
+    title = "Scores de Eficiencia DEA (VRS-OO)",
+    subtitle = "Comparacao SIOPE vs. SICONFI por Ano (1 = 100% Eficiente)",
+    x = "Municipio (DMU)",
+    y = "Score de Eficiencia"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text.y = element_text(size = 7),
+        strip.text = element_text(face="bold"))
+```
+
+#### 6.1.3. Comparação de eficiência DEA cross-section
+
+O gráfico abaixo mostra o score de eficiência de cada município. A linha vermelha tracejada em `X=1` representa a fronteira de eficiência.
+
+-   Municípios com score `> 1` são **ineficientes** (pontos circulares pequenos).
+-   Municípios com score `== 1` são **eficientes** (destacados como triângulos azuis maiores).
+
+```{r carregar-dados-dea}
+dados_eff <- readxl::read_excel("dados_mucuri.xlsx", sheet = "eff_dea")
+
+# Preparar dados para o gráfico
+# 1. Converter ANO para fator (para facetas)
+# 2. Criar a coluna de destaque para EFF == 1
+dados_eff <- dados_eff %>%
+  mutate(
+    ANO = factor(ANO),
+    # Arredondamos para evitar problemas de ponto flutuante (ex: 1.0000001)
+    is_efficient = ifelse(round(EFF, 6) == 1, 
+                          "Eficiente (Score = 1)", 
+                          "Ineficiente (Score > 1)")
+  )
+
+kable(head(dados_eff), caption = "Amostra dos Dados de Eficiência (eff_dea)") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+```{r grafico-dea-cross-section-eff, fig.width=14, fig.height=10}
+ggplot(dados_eff, aes(x = EFF, y = fct_reorder(DMU, EFF), color = is_efficient)) +
+  
+  # Linha de "fronteira" (eficiência = 1)
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red", linewidth = 1.2) +
+  
+  # O "cabo" do lollipop: um segmento de 1.0 até o score
+  geom_segment(
+    aes(xend = 1, yend = DMU), 
+    color = "grey", 
+    linewidth = 0.8
+  ) +
+  
+  # O "doce" do lollipop: o ponto
+  geom_point(aes(shape = is_efficient, size = is_efficient)) +
+  
+  # --- Faceta 2x3 (Linha = Fonte, Coluna = Ano) ---
+  facet_grid(FONTE ~ ANO) +
+  
+  # --- Escalas e Destaques ---
+  scale_color_manual(
+    name = "Status de Eficiência",
+    values = c("Eficiente (Score = 1)" = "blue", "Ineficiente (Score > 1)" = "black")
+  ) +
+  scale_shape_manual(
+    name = "Status de Eficiência",
+    values = c("Eficiente (Score = 1)" = 17, "Ineficiente (Score > 1)" = 16) # Triângulo e Círculo
+  ) +
+  scale_size_manual(
+    name = "Status de Eficiência",
+    values = c("Eficiente (Score = 1)" = 4, "Ineficiente (Score > 1)" = 2.5) # Ponto maior e menor
+  ) +
+  
+  # Rótulos (sem acentos para evitar erros de codificação)
+  labs(
+    title = "Analise de Eficiencia DEA por Ano e Fonte (VRS-OO)",
+    subtitle = "Scores de Eficiencia (EFF). Linha vermelha = Fronteira Eficiente (Score = 1).",
+    x = "Score de Eficiencia (EFF)",
+    y = "Municipio (DMU)"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(size = 8) # Texto do eixo Y menor para caber
+  )
+```
+
+#### 6.1.4. Comparação de gaps DEA cross-section
+
+Este gráfico mostra o **alvo** de produção (o `GAP_RESULTADO`) para os municípios *ineficientes*, comparando o alvo do SIOPE vs SICONFI. Municípios eficientes (score=1) não estão neste gráfico, pois seu "alvo" é a sua produção atual.
+
+```{r grafico-dea-cross-section-gap, fig.width=14, fig.height=10}
+# --- ETAPA 1: Identificar e filtrar outliers ---
+dados_gap <- dados_eff %>%
+  filter(is_efficient == "Ineficiente (Score > 1)")
+
+limite_gap <- 10 
+
+outlier_pairs <- dados_gap %>%
+  filter(GAP_RESULTADO > limite_gap) %>%
+  select(DMU, ANO) %>%
+  distinct()
+
+dados_gap_inliers <- dados_gap %>%
+  anti_join(outlier_pairs, by = c("DMU", "ANO"))
+
+# --- ETAPA 2: Preparar dados para o gráfico de pirâmide ---
+dados_pyramid <- dados_gap_inliers %>%
+  mutate(
+    Plot_Gap = ifelse(FONTE == "SIOPE", -GAP_RESULTADO, GAP_RESULTADO)
+  )
+
+# --- ETAPA 3: Plotar o Gráfico de Pirâmide ---
+ggplot(dados_pyramid, 
+       # --- MUDANÇA 1: Reverter a ordem do eixo Y ---
+       aes(x = Plot_Gap, y = fct_rev(fct_reorder(DMU, GAP_RESULTADO)), fill = FONTE)) +
+  
+  # --- MUDANÇA 2: Adicionar 'width' para afinar as barras ---
+  geom_col(show.legend = FALSE, width = 0.7) + 
+  
+  geom_vline(xintercept = 0, color = "black", linewidth = 1) +
+  facet_wrap(~ ANO, ncol = 3, scales = "free_y") + 
+  scale_x_continuous(labels = ~ abs(.)) +
+  scale_fill_manual(values = c("SIOPE" = "steelblue", "SICONFI" = "coral")) +
+  
+  geom_text(
+    data = . %>% distinct(ANO, FONTE), 
+    aes(
+      x = ifelse(FONTE == "SIOPE", -Inf, Inf), 
+      y = Inf, 
+      label = FONTE,
+      hjust = ifelse(FONTE == "SIOPE", -0.1, 1.1) 
+    ),
+    color = "black",
+    vjust = 2, 
+    size = 4,
+    fontface = "bold"
+  ) +
+  
+  # Rótulos
+  labs(
+    title = "Comparacao do 'Gap de Producao' (Inliers) por Fonte",
+    subtitle = "Gaps de SIOPE (esquerda) vs. SICONFI (direita). Apenas Gaps < 10.",
+    x = "Alvo de Producao (GAP_RESULTADO)",
+    y = "Municipio (DMU)"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(size = 8)
+  )
+```
+
+#### 6.1.5. "Disputa" de benchmarks - 2023
+
+Este gráfico mostra o principal benchmark para cada DMU em 2023.
+
+```{r dados-benchmark}
+dados_bench_raw <- readxl::read_excel("dados_mucuri.xlsx", sheet = "benchmarks")
+
+# 2. Preparar dados para o HEATMAP (dados_bench_long)
+dados_bench_long <- dados_bench_raw %>%
+  rename(Influencia = LAMBDA) %>% 
+  filter(DMU != BENCHMARK, Influencia > 0) %>%
+  mutate(
+    DMU = factor(DMU),
+    BENCHMARK = factor(BENCHMARK),
+    FONTE = factor(FONTE)
+  )
+
+kable(head(dados_bench_long), caption = "Amostra dos Dados de Benchmark Prontos")
+
+# 3. Preparar dados para o GRAFICO DE REDE (graph_obj)
+# Esta é a forma mais robusta de criar o objeto de grafo
+
+# 3a. Criar a lista de ARESTAS (edges)
+dados_edges <- dados_bench_raw %>%
+  rename(Influencia = LAMBDA) %>% 
+  filter(DMU != BENCHMARK, Influencia > 0) %>%
+  mutate(FONTE = factor(FONTE))
+
+# 3b. Criar a lista de NÓS (nodes)
+all_nodes_names <- unique(c(dados_edges$DMU, dados_edges$BENCHMARK))
+nodes_df <- data.frame(name = all_nodes_names) %>%
+  mutate(
+    is_benchmark = (name %in% c("Santa Helena de Minas", "Teófilo Otoni"))
+  )
+
+# 3c. Criar o objeto de grafo (graph_obj) - CORRIGIDO
+# Primeiro, criamos o grafo a partir das ARESTAS (edges) usando as_tbl_graph()
+graph_obj <- as_tbl_graph(
+  dados_edges,
+  from = "BENCHMARK",
+  to = "DMU",
+  directed = TRUE
+)
+
+# Segundo, juntamos (join) os atributos dos NÓS (nodes)
+graph_obj <- graph_obj %>%
+  activate(nodes) %>% # Foca na tabela de nós
+  # O 'name' é criado automaticamente pelo as_tbl_graph
+  left_join(nodes_df, by = "name")
+
+# Este gráfico usa o 'dados_bench_long' e permanece o mesmo
+ggplot(dados_bench_long, aes(x = BENCHMARK, y = fct_rev(DMU), fill = Influencia)) +
+  
+  geom_tile(color = "white", linewidth = 0.5) + 
+  geom_text(aes(label = round(Influencia, 2)), color = "black", size = 3.5) +
+  facet_wrap(~ FONTE, ncol = 2) +
+  scale_fill_gradient(low = "#e6f5e0", high = "#006d2c", limits = c(0, 1)) +
+  
+  labs(
+    title = "Mapa de Calor da Influência dos Benchmarks",
+    subtitle = "Força da relação (LAMBDA) entre cada DMU e seus benchmarks",
+    x = "Benchmark (Município Eficiente)",
+    y = "DMU (Município Ineficiente)",
+    fill = "Força (LAMBDA)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 15, hjust = 0.5), 
+    axis.text.y = element_text(size = 9),
+    strip.text = element_text(face = "bold", size = 12),
+    panel.grid = element_blank()
+  )
+
+# Este gráfico usa o 'graph_obj' (que agora está correto)
+ggraph(graph_obj, layout = 'kk') + 
+  
+  # --- AS SETAS (EDGES) ---
+  facet_edges(~ FONTE) +
+  geom_edge_link(
+    aes(width = Influencia), 
+    color = "grey60",
+    alpha = 0.7,
+    arrow = arrow(length = unit(3, 'mm')),
+    end_cap = circle(5, 'mm')
+  ) +
+  
+  # --- OS NÓS (MUNICÍPIOS) ---
+  # 'is_benchmark' foi juntado (joined) no bloco 'dados-benchmark'
+  geom_node_point(
+    aes(color = is_benchmark), 
+    size = 8
+  ) +
+  
+  # 'name' é a coluna padrão de nomes dos nós
+  geom_node_text(aes(label = name), repel = TRUE, size = 3.5, color = "black") +
+  
+  # --- Legendas e Escalas ---
+  scale_edge_width(name = "Força (LAMBDA)", range = c(0.5, 4)) +
+  
+  scale_color_manual(
+    name = "Nó",
+    values = c("TRUE" = "green", "FALSE" = "lightblue"),
+    labels = c("TRUE" = "Benchmark", "FALSE" = "DMU Ineficiente")
+  ) +
+  
+  labs(
+    title = "Rede de Influência (SIOPE vs. SICONFI)",
+  ) +
+  theme_graph() + 
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 12)
+  )
+```
+
+### 6.2. Índice de Malmquist (Produtividade)
+
+Calculamos o índice de Malmquist para avaliar a mudança na produtividade total dos fatores (TFP) ao longo do tempo. Primeiro, carregamos os dados preparados para esta análise.
+
+#### 6.2.1. Malmquist - SIOPE
+
+```{r malmquist-siope}
+dea_malmquist_siope <- make_malmquist(dados_dea,
+                                    percol = 2,
+                                    nper = 3,
+                                    arrangement = "vertical",
+                                    input = 3, #coluna 3 -> SIOPE
+                                    output = 5:6) 
+
+modelo_malmquist_siope <- malmquist_index( dea_malmquist_siope,
+                                         orientation = "oo",
+                                         rts = "vrs")
+
+# Exporta resultados para Excel
+summary(modelo_malmquist_siope)
+```
+
+#### 6.2.2. Malmquist - SICONFI
+
+```{r malmquist-siconfi}
+dea_malmquist_siconfi <- make_malmquist(dados_dea,
+                                        percol = 2,
+                                        nper = 3,
+                                        arrangement = "vertical",
+                                        input = 4, #coluna 4 -> SICONFI
+                                        output = 5:6) 
+
+modelo_malmquist_siconfi <- malmquist_index( dea_malmquist_siconfi,
+                                             orientation = "oo",
+                                             rts = "vrs")
+
+# Exporta resultados para Excel
+summary(modelo_malmquist_siconfi)
+```
+
+```{r grafico-periodo}
+# Extrai os resultados POR PERÍODO
+# t() transpõe a matriz para que as DMUs fiquem nas linhas
+malm_siope_df <- as.data.frame(t(modelo_malmquist_siope$mi))
+# Renomeia as colunas com os períodos
+colnames(malm_siope_df) <- c("2017-2019", "2019-2023")
+
+malm_siope_df <- malm_siope_df %>%
+  rownames_to_column("DMU") %>% # Pega o nome das DMUs (que eram nomes de linha)
+  # Transforma de formato "wide" para "long", ideal para o ggplot
+  pivot_longer(cols = -DMU, names_to = "Periodo", values_to = "TFPCH") %>%
+  mutate(Fonte = "SIOPE")
+
+# Extrai os resultados POR PERÍODO
+malm_siconfi_df <- as.data.frame(t(modelo_malmquist_siconfi$mi))
+colnames(malm_siconfi_df) <- c("2017-2019", "2019-2023")
+
+malm_siconfi_df <- malm_siconfi_df %>%
+  rownames_to_column("DMU") %>%
+  pivot_longer(cols = -DMU, names_to = "Periodo", values_to = "TFPCH") %>%
+  mutate(Fonte = "SICONFI")
+
+# ----- GRÁFICO 4: COMPARAÇÃO DO ÍNDICE DE MALMQUIST (TFPCH) POR PERÍODO -----
+
+# Combina os resultados
+malm_combinado_df <- bind_rows(malm_siope_df, malm_siconfi_df)
+
+# --- DEFINIÇÃO DE GRUPOS (POR LINHA) ---
+# Esta é a parte crucial: A classificação "Grupo" é aplicada a CADA LINHA.
+# Um município pode ser "Inlier" em um período e "Outlier" em outro.
+malm_combinado_df <- malm_combinado_df %>%
+  mutate(
+    Grupo = ifelse(TFPCH > 2 | TFPCH < 0.2, 
+                   "Outliers (Escala Alta)", 
+                   "Inliers (Escala Normal)")
+  )
+
+# --- NOVO GRÁFICO COM 4 PAINÉIS (usando facet_wrap) ---
+# Trocamos facet_grid por facet_wrap e removemos o fct_reorder
+ggplot(malm_combinado_df, aes(x = TFPCH, y = DMU, fill = Fonte)) +
+  geom_col(position = position_dodge(width = 0.9)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+  
+  # --- MUDANÇA PARA facet_wrap ---
+  # Isso cria 4 painéis independentes. "scales = 'free'" permite que cada
+  # painel tenha seus próprios eixos X e Y (removendo DMUs vazias).
+  facet_wrap(Grupo ~ Periodo, scales = "free", ncol = 2) +
+  
+  labs(
+    title = "Produtividade Total dos Fatores (Malmquist TFPCH) por Periodo",
+    subtitle = "> 1 indica ganho de produtividade; < 1 indica perda.",
+    x = "Indice TFPCH (Variacao da Produtividade Total)",
+    y = "Municipio (DMU)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        # Texto do eixo Y menor para caber
+        axis.text.y = element_text(size = 7), 
+        strip.text = element_text(face = "bold", size = 10))
+```
+
+```{r carregar-dados-malmquist}
+# Carrega os dados da planilha
+dados_malm_raw <- readxl::read_excel("dados_mucuri.xlsx", sheet = "avg_mlmq")
+
+# Pivota os dados: transforma as colunas (mi, tc, pech, sech) em linhas
+dados_malm_long <- dados_malm_raw %>%
+  pivot_longer(
+    cols = c("mi", "tc", "pech", "sech"),
+    names_to = "Componente",
+    values_to = "Valor"
+  ) %>%
+  # Converte 'Componente' em um fator para ordenar as barras no gráfico
+  mutate(
+    Componente = factor(Componente, levels = c("mi", "tc", "pech", "sech")),
+    ANO = factor(ANO) # Converte ANO em fator para o eixo X
+  )
+
+kable(head(dados_malm_long), caption = "Dados de Malmquist em Formato Longo")
+```
+
+O gráfico abaixo mostra o índice `mi` (azul) e seus três componentes. A linha vermelha tracejada em `Y=1` representa a fronteira de "sem mudança". Valores acima de 1 são ganhos de produtividade/eficiência; valores abaixo são perdas.
+
+```{r grafico-decomposicao-malmquist, fig.width=10, fig.height=6}
+ggplot(dados_malm_long, aes(x = ANO, y = Valor, fill = Componente)) +
+  
+  # Cria as barras agrupadas (lado a lado)
+  geom_col(position = position_dodge(width = 0.9), color = "black", alpha = 0.8) +
+  
+  # --- A LINHA DE REFERÊNCIA (CRUCIAL) ---
+  # y=1 significa "sem mudança"
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red", linewidth = 1) +
+  
+  # --- Faceta por Fonte ---
+  # Um painel para SIOPE, outro para SICONFI
+  facet_wrap(~ FONTE, ncol = 2) +
+  
+  # Define cores personalizadas para os componentes
+  scale_fill_manual(
+    values = c("mi" = "#0072B2", "tc" = "#D55E00", "pech" = "#009E73", "sech" = "#CC79A7"),
+    labels = c("mi" = "Produtividade Total (mi)", 
+               "tc" = "Mudança Técnica (tc)",
+               "pech" = "Mudança de Eficiência Pura (pech)",
+               "sech" = "Mudança de Eficiência de Escala (sech)")
+  ) +
+  
+  # Rótulos (sem acentos para evitar erros de codificação)
+  labs(
+    title = "Decomposicao do Indice de Malmquist (mi = tc * pech * sech)",
+    subtitle = "Linha vermelha (Y=1) indica 'sem mudanca'.",
+    x = "Período de Análise",
+    y = "Valor do Índice",
+    fill = "Componente do Índice"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+O gráfico abaixo mostra a mudança em cada componente (mi, tc, pech, sech) entre 2019 e 2023. A linha vermelha tracejada em `Y=1` representa a fronteira de "sem mudança".
+
+```{r grafico-decomposicao-slope, fig.width=12, fig.height=7}
+# O objeto 'dados_malm_long' foi criado no bloco 'carregar-dados-malmquist'
+
+ggplot(dados_malm_long, aes(x = ANO, y = Valor, group = FONTE, color = FONTE)) +
+  
+  # A linha de inclinação
+  geom_line(linewidth = 1.5, alpha = 0.8) +
+  
+  # Os pontos de início e fim
+  geom_point(size = 4) +
+  
+  # Linha de referência Y=1
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red", linewidth = 1) +
+  
+  # --- MUDANÇA 1: Voltar para o facet_grid (8 painéis) ---
+  # 'scales = "free_y"' permite que 'pech' tenha sua própria escala
+  facet_grid(FONTE ~ Componente, scales = "free_y") +
+  
+  # --- MUDANÇA 2: Usar geom_text para os rótulos ---
+  geom_text(
+    aes(label = round(Valor, 2)), 
+    color = "black", 
+    size = 3.5,
+    show.legend = FALSE,
+    vjust = -1.5 # Posição vertical (um pouco acima do ponto)
+  ) +
+  
+  # --- MUDANÇA 3: Expandir o eixo Y para mostrar os rótulos ---
+  # Adiciona 15% de espaço no topo de CADA painel
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  
+  # Define as cores SIOPE/SICONFI
+  scale_color_manual(values = c("SIOPE" = "steelblue", "SICONFI" = "coral")) +
+  
+  # Rótulos (sem acentos)
+  labs(
+    title = "Evolucao dos Componentes do Indice de Malmquist (2019 vs. 2023)",
+    subtitle = "Linha vermelha (Y=1) indica 'sem mudanca'.",
+    x = "Período de Análise",
+    y = "Valor do Índice (em escalas livres)",
+    color = "Fonte de Dados"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none", # Legenda é redundante (está no título da linha)
+    strip.text = element_text(face = "bold", size = 11) 
+  )
+```
+
+### 6.3. Carga e Preparação dos Dados (Nível DMU)
+
+Carregamos os dados da planilha "dmus_mlmq" e os preparamos para a visualização, pivotando os componentes (mi, tc, pech, sech) para o formato "longo".
+
+```{r carregar-dados-malmquist-dmu}
+# 1. Carregar os dados
+dados_mlmq_dmu_raw <- readxl::read_excel("dados_mucuri.xlsx", sheet = "dmus_mlmq")
+
+# 2. Pivotar para o formato longo (Tidy)
+dados_mlmq_dmu_long <- dados_mlmq_dmu_raw %>%
+  pivot_longer(
+    cols = c("mi", "tc", "pech", "sech"),
+    names_to = "Componente",
+    values_to = "Valor"
+  ) %>%
+  # 3. Converter colunas para Fatores (para ordenar os gráficos)
+  mutate(
+    Componente = factor(Componente, levels = c("mi", "tc", "pech", "sech")),
+    ANO = factor(ANO), # ANO precisa ser fator para o eixo X do slope chart
+    DMU = factor(DMU),
+    FONTE = factor(FONTE)
+  )
+
+kable(head(dados_mlmq_dmu_long), caption = "Amostra dos Dados Malmquist por DMU (Formato Longo)")
+```
+
+#### 6.3.1. Gráfico: Matriz de Análise Malmquist (13 DMUs x 4 Componentes)
+
+O gráfico abaixo é uma matriz completa que mostra a evolução de 2019 para 2023 de todos os componentes, para todos os municípios.
+
+-   **Linhas:** Municípios (DMUs)
+-   **Colunas:** Componentes (`mi`, `tc`, `pech`, `sech`)
+-   **Cores:** Linha azul (SIOPE) vs. Linha vermelha (SICONFI)
+-   **Linha Tracejada:** Referência de "sem mudança" (Valor = 1.0)
+
+```{r grafico-matriz-malmquist-dmu, fig.width=14, fig.height=22}
+ggplot(dados_mlmq_dmu_long, aes(x = ANO, y = Valor, group = FONTE, color = FONTE)) +
+  
+  # A linha de inclinação (que conecta 2019 a 2023)
+  geom_line(linewidth = 1.2, alpha = 0.8) +
+  
+  # Os pontos de início e fim
+  geom_point(size = 2.5) +
+  
+  # --- A LINHA DE REFERÊNCIA (CRUCIAL) ---
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red", linewidth = 0.8) +
+  
+  # --- A MÁGICA: Faceta de Grade (13 Linhas x 4 Colunas) ---
+  # 'scales = "free_y"' é ESSENCIAL: permite que cada linha (DMU)
+  # e cada coluna (Componente) tenha sua própria escala de eixo Y.
+  # Isso impede que os outliers (ex: 'pech' em Ataléia) esmaguem os outros.
+  facet_grid(DMU ~ Componente, scales = "free_y") +
+  
+  # --- Rótulos dos Valores ---
+  # Usamos ggrepel para evitar que os rótulos de SIOPE/SICONFI se sobreponham
+  geom_text_repel(
+    aes(label = round(Valor, 2)), 
+    color = "black", 
+    size = 2.5, # Tamanho de fonte menor para caber
+    show.legend = FALSE,
+    # Força os rótulos a se afastarem verticalmente
+    direction = "y", 
+    nudge_y = 0.1,
+    segment.color = NA
+  ) +
+  
+  # Define as cores SIOPE/SICONFI
+  scale_color_manual(values = c("SIOPE" = "steelblue", "SICONFI" = "coral")) +
+  
+  # Rótulos (sem acentos)
+  labs(
+    title = "Matriz de Decomposicao do Indice de Malmquist por DMU e Fonte",
+    subtitle = "Evolucao 2019-2023. Linha vermelha (Y=1) indica 'sem mudanca'.",
+    x = "Período de Análise",
+    y = "Valor do Índice (em escalas Y livres)",
+    color = "Fonte de Dados"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom", 
+    # Títulos dos painéis (DMU e Componente) em negrito e com tamanho ajustado
+    strip.text.x = element_text(face = "bold", size = 11),
+    strip.text.y = element_text(face = "bold", size = 8, angle = 0),
+    # Remove o texto do eixo X (é repetitivo)
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+```
+
+## 7. Análise de Caso: Municípios Outliers
+
+Conforme identificado nas análises anteriores, os municípios `Ataléia`, `Fronteira dos Vales`, e `Novo Oriente de Minas` apresentaram comportamentos extremos (ex: colapso de produtividade em 2017-2019 seguido de explosão, e dados de resultado inexistentes em 2019) que distorcem as médias e as escalas dos gráficos.
+
+Esta seção isola esses três municípios para uma análise focada.
+
+### 7.1. Carga e Filtro dos Dados dos Outliers
+
+Primeiro, carregamos os pacotes necessários e filtramos a planilha `malmquist_data` para conter *apenas* os três municípios de interesse.
+
+```{r carregar-dados-outliers}
+# 1. Carregar os dados
+dados_outliers_raw <- readxl::read_excel("dados_mucuri.xlsx", sheet = "malmquist_data") 
+
+# 2. Definir a lista de outliers e filtrar
+lista_outliers <- c("Ataléia", "Fronteira dos Vales", "Novo Oriente de Minas")
+
+dados_outliers <- dados_outliers_raw %>%
+  filter(nom_munic %in% lista_outliers)
+
+kable(head(dados_outliers), caption = "Amostra dos Dados dos 3 Outliers")
+```
+
+### 7.2. Gráfico 1: Séries Temporais de Gastos vs. Resultados
+
+A forma mais clara de ver a história é plotar os "Inputs" (Gastos) e os "Outputs" (Taxas) em gráficos separados, mas alinhados pelo tempo.
+
+-   O gráfico superior mostra o Gasto Médio (SIOPE vs. SICONFI) ao longo do tempo.
+-   O gráfico inferior mostra as Taxas de Adequação (LP vs. MT) ao longo do tempo.
+-   Note que as linhas de Taxas **quebram** em 2019, visualizando seus dados faltantes.
+
+```{r grafico-timeseries-outliers, fig.width=10, fig.height=8}
+# 1. Preparar dados de Gasto (longo)
+dados_outliers_gasto_long <- dados_outliers %>%
+  pivot_longer(
+    cols = c("gasto_med_3A_SIOPE", "gasto_med_3A_SICONFI"),
+    names_to = "Fonte_Gasto",
+    values_to = "Gasto"
+  )
+
+# 2. Preparar dados de Taxas (longo)
+dados_outliers_taxas_long <- dados_outliers %>%
+  pivot_longer(
+    cols = c("lp_adequado", "mt_adequado"),
+    names_to = "Tipo_Taxa",
+    values_to = "Taxa"
+  )
+
+# 3. Gráfico A: Gastos (Inputs)
+plot_gasto <- ggplot(dados_outliers_gasto_long, 
+                     aes(x = ano, y = Gasto, color = Fonte_Gasto)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dotted", linewidth = 0.8) +
+  facet_wrap(~ nom_munic, ncol = 3) + # Um painel por município
+  scale_x_continuous(breaks = c(2017, 2019, 2023)) +
+  scale_color_manual(values = c("gasto_med_3A_SIOPE" = "steelblue", "gasto_med_3A_SICONFI" = "coral")) +
+  labs(
+    title = "Evolução do GASTO (Inputs) nos Municípios Outliers",
+    x = NULL, # Remove o eixo X para alinhar com o gráfico de baixo
+    y = "Gasto Médio por Aluno (R$)/10.000",
+    color = "Fonte de Gasto"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        strip.text = element_text(face = "bold"))
+
+# 4. Gráfico B: Taxas (Outputs)
+plot_taxas <- ggplot(dados_outliers_taxas_long, 
+                     aes(x = ano, y = Taxa, color = Tipo_Taxa)) +
+  geom_line(linewidth = 1.2) + # A linha irá quebrar em 2019 (onde há NA)
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dotted", linewidth = 0.8) +
+  facet_wrap(~ nom_munic, ncol = 3) +
+  scale_x_continuous(breaks = c(2017, 2019, 2023)) +
+  scale_color_manual(values = c("lp_adequado" = "darkgreen", "mt_adequado" = "purple")) +
+  labs(
+    title = "Evolução das TAXAS DE ADEQUAÇÃO (Outputs) nos Municípios Outliers",
+    subtitle = "A 'quebra' na linha indica dados inexistentes em 2019.",
+    x = "Ano",
+    y = "Taxa de Adequação (%)",
+    color = "Indicador"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        strip.text = element_text(face = "bold"))
+
+# 5. Combina os gráficos (um em cima do outro)
+plot_gasto / plot_taxas
+```
+
+### 7.3. Gráfico 2: Relação Custo-Resultado (Scatter Plot Conectado)
+
+Este gráfico (menos usual) mostra a trajetória da eficiência: o eixo X é o Gasto e o eixo Y é a Taxa de Adequação. Ele nos ajuda a ver se mais gasto está gerando melhores resultados ao longo do tempo.
+
+```{r grafico-scatter-outliers, fig.width=12, fig.height=6}
+# 1. Preparar os dados (pivotar gastos, manter taxas)
+dados_outliers_scatter <- dados_outliers %>%
+  pivot_longer(
+    cols = c(gasto_med_3A_SIOPE, gasto_med_3A_SICONFI),
+    names_to = "Fonte_Gasto",
+    values_to = "Gasto"
+  )
+
+# 2. Gráfico A: Português
+plot_lp <- ggplot(dados_outliers_scatter, 
+                  aes(x = Gasto, y = lp_adequado, color = nom_munic)) +
+  # geom_path conecta os pontos na ordem do 'ano'
+  geom_path(linewidth = 1, arrow = arrow(type = "closed", length = unit(0.15, "inches"))) +
+  geom_point(size = 3) +
+  # geom_text_repel rotula os anos (2017 e 2023)
+  geom_text_repel(aes(label = ano), color = "black", show.legend = FALSE) +
+  # Separa SIOPE e SICONFI
+  facet_wrap(~ Fonte_Gasto, scales = "free_x") + 
+  labs(
+    title = "Trajetória Gasto vs. Português (2017 -> 2023)",
+    x = "Gasto Médio por Aluno (R$)/10.000",
+    y = "Taxa de Adequação (LP)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "none",
+        strip.text = element_text(face = "bold"))
+
+# 3. Gráfico B: Matemática
+plot_mt <- ggplot(dados_outliers_scatter, 
+                  aes(x = Gasto, y = mt_adequado, color = nom_munic)) +
+  geom_path(linewidth = 1, arrow = arrow(type = "closed", length = unit(0.15, "inches"))) +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = ano), color = "black", show.legend = FALSE) +
+  facet_wrap(~ Fonte_Gasto, scales = "free_x") + 
+  labs(
+    title = "Trajetória Gasto vs. Matemática (2017 -> 2023)",
+    x = "Gasto Médio por Aluno (R$)/10.000",
+    y = "Taxa de Adequação (MT)",
+    color = "Município" # Adiciona a legenda só aqui
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        strip.text = element_text(face = "bold"))
+
+# 4. Combina os gráficos (lado a lado)
+plot_lp + plot_mt
+```

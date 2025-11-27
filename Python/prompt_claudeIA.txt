@@ -1,0 +1,18 @@
+
+|------------------------------------------------------------------|
+|                                                                  |
+|   Chat disponível em:                                            |
+|   https://claude.ai/share/1ae81331-08d5-4543-856b-f51efa9db0d2   |
+|                                                                  |
+|------------------------------------------------------------------|
+
+Prompt Claude:
+
+Crie um script python para ler consumir a API "https://apidatalake.tesouro.gov.br/ords/siconfi/tt//dca?an_exercicio=&no_anexo=&id_ente=" onde no_anexo=DCA-Anexo%20I-E e o id_ente e an_exercicio são retirados de um arquivo csv do tipo:
+
+ano;codigo
+2024;2232423
+.....
+
+Use o o Tkinter theme. O usuário vai adicionar o arquivo csv de controle. Os dados serão salvos todos em um arquivo json que poderá ser exportado para um arquivo CSV. Mostre uma barra de progresso e deixe o usuário inteirado do processo de captura, gravação e exportação dos dados.
+
