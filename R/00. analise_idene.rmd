@@ -1,0 +1,373 @@
+---
+title: "Análise Comparativa: Gasto por Aluno (SIOPE vs. SICONFI) e Indicadores Educacionais"
+subtitle: "Municípios do IDENE"
+author: "Rafael Abreu"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: united
+    number_sections: true
+lang: pt-BR
+---
+
+```{r setup, include=FALSE}
+# Opções globais do R Markdown
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## 1. Configuração do Ambiente
+
+Carrega pacotes para manipulação de dados, visualização e formatação de tabelas.
+
+```{r carregar-pacotes}
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(patchwork)
+library(readxl)
+```
+
+## 2. Carga e Preparação dos Dados
+
+A análise abrange a base do IDENE. Para viabilizar a visualização de municípios em formato gráfico, filtraremos os top 20 com maiores discrepâncias médias quando necessário, devido ao grande volume de cidades na base.
+
+```{r carregar-dados}
+# Gasto
+dados_gasto <- read_excel("nova_base.xlsx", sheet = "GASTO") %>%
+  rename(ano = NUM_ANO, nom_munic = NOM_MUN) %>%
+  mutate(
+    diff_abs = SIOPE_CORR - SICONFI_CORR,
+    diff_perc = (diff_abs / SICONFI_CORR) * 100
+  )
+
+# SAEB
+dados_saeb <- read_excel("nova_base.xlsx", sheet = "SAEB")
+
+# INSE
+dados_inse <- read_excel("nova_base.xlsx", sheet = "INSE")
+
+# TDI
+dados_tdi <- read_excel("nova_base.xlsx", sheet = "TDI") %>%
+  rename(COD_IBGE = `Código do Município`, nom_munic = `Nome do Município`, ano = Ano)
+```
+
+## 3. Análise Descritiva Geral (2015-2024)
+
+### 3.1. Estatísticas Gerais e Densidade
+
+```{r estatisticas-gerais-detalhadas}
+# Transforma os dados para calcular múltiplas estatísticas facilmente
+estatisticas_completas <- dados_gasto %>%
+  select(SIOPE_CORR, SICONFI_CORR, diff_abs, diff_perc) %>%
+  pivot_longer(cols = everything(), names_to = "Variavel", values_to = "Valor") %>%
+  group_by(Variavel) %>%
+  summarise(
+    Minimo = min(Valor, na.rm = TRUE),
+    Q1 = quantile(Valor, 0.25, na.rm = TRUE),
+    Mediana = median(Valor, na.rm = TRUE),
+    Media = mean(Valor, na.rm = TRUE),
+    Q3 = quantile(Valor, 0.75, na.rm = TRUE),
+    Maximo = max(Valor, na.rm = TRUE),
+    SD = sd(Valor, na.rm = TRUE),
+    CV_perc = (sd(Valor, na.rm = TRUE) / abs(mean(Valor, na.rm = TRUE))) * 100
+  ) %>%
+  # Uso do case_when() no lugar de recode() para evitar conflito de pacotes
+  mutate(Variavel = case_when(
+    Variavel == "SIOPE_CORR"   ~ "Gasto SIOPE (R\\$)",
+    Variavel == "SICONFI_CORR" ~ "Gasto SICONFI (R\\$)",
+    Variavel == "diff_abs"     ~ "Diferença Absoluta (R\\$)",
+    Variavel == "diff_perc"    ~ "Diferença Percentual (%)"
+  )) %>%
+  # Ordena a tabela para manter uma lógica de leitura
+  arrange(match(Variavel, c("Gasto SIOPE (R\\$)", "Gasto SICONFI (R\\$)", "Diferença Absoluta (R\\$)", "Diferença Percentual (%)")))
+
+# Gera a tabela formatada
+kable(estatisticas_completas, 
+      caption = "Estatísticas Descritivas Detalhadas - Gastos e Diferenças (IDENE)", 
+      digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+```{r grafico-densidade-diferenca, fig.width=10, fig.height=4}
+p1 <- ggplot(dados_gasto, aes(x = diff_abs)) +
+  geom_density(fill = "steelblue", alpha = 0.7) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+  geom_vline(aes(xintercept = mean(diff_abs, na.rm=TRUE)), linetype = "dotted", color = "black", linewidth = 1) +
+  labs(title = "Distribuição da Diferença Absoluta (SIOPE - SICONFI)",
+       x = "Diferença Absoluta (R$)", y = "Densidade") +
+  theme_minimal()
+
+p2 <- ggplot(dados_gasto, aes(x = diff_perc)) +
+  geom_density(fill = "coral", alpha = 0.7) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+  geom_vline(aes(xintercept = mean(diff_perc, na.rm=TRUE)), linetype = "dotted", color = "black", linewidth = 1) +
+  labs(title = "Distribuição da Diferença Percentual (SIOPE - SICONFI)",
+       x = "Diferença Percentual (%)", y = "Densidade") +
+  theme_minimal()
+
+p1 + p2
+```
+
+### 3.2. Boxplots e ECDF (Resumo Estatístico)
+
+```{r graficos-descritivos-boxplots, fig.width=10, fig.height=5}
+dados_long_gasto <- dados_gasto %>%
+  select(SIOPE_CORR, SICONFI_CORR) %>%
+  pivot_longer(cols = c(SIOPE_CORR, SICONFI_CORR), names_to = "Fonte", values_to = "Gasto_por_Aluno")
+
+b1 <- ggplot(dados_long_gasto, aes(x = Fonte, y = Gasto_por_Aluno, fill = Fonte)) +
+  geom_boxplot(alpha = 0.8) +
+  scale_fill_manual(values = c("SIOPE_CORR" = "steelblue", "SICONFI_CORR" = "coral")) +
+  labs(title = "Níveis de Gasto por Aluno", y = "Gasto por Aluno (R$)") +
+  theme_light() + theme(legend.position = "none")
+
+dados_long_diff <- dados_gasto %>%
+  select(diff_abs, diff_perc) %>%
+  pivot_longer(cols = c(diff_abs, diff_perc), names_to = "Metrica", values_to = "Valor")
+
+b2 <- ggplot(dados_long_diff, aes(x = Metrica, y = Valor, fill = Metrica)) +
+  geom_boxplot(alpha = 0.8, show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+  facet_wrap(~ Metrica, scales = "free") + 
+  scale_fill_manual(values = c("diff_abs" = "darkgreen", "diff_perc" = "purple")) +
+  labs(title = "Diferenças (Absoluta e %)") + theme_light()
+
+b1 + b2
+```
+
+```{r grafico-descritivo-ecdf, fig.width=8, fig.height=5}
+ggplot(dados_long_gasto, aes(x = Gasto_por_Aluno, color = Fonte)) +
+  stat_ecdf(linewidth = 1.2) + 
+  scale_color_manual(values = c("SIOPE_CORR" = "steelblue", "SICONFI_CORR" = "coral")) +
+  labs(title = "Comparação das Distribuições de Gasto (ECDF)",
+       x = "Gasto por Aluno (R$)", y = "Proporção Cumulativa") +
+  theme_bw() + theme(legend.position = "bottom")
+```
+
+## 4. Análise por Ano (Série Temporal Global)
+
+### 4.1. Tabela Anual
+
+```{r tabela-por-ano}
+analise_ano <- dados_gasto %>%
+  group_by(ano) %>%
+  summarise(
+    Media_SIOPE = mean(SIOPE_CORR, na.rm = TRUE),
+    Media_SICONFI = mean(SICONFI_CORR, na.rm = TRUE),
+    Media_Diff_Abs = mean(diff_abs, na.rm = TRUE),
+    Media_Diff_Perc = mean(diff_perc, na.rm = TRUE)
+  )
+
+kable(analise_ano, caption = "Médias de Gastos e Diferenças por Ano", digits = 2) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+### 4.2. Evolução das Diferenças por Ano
+
+```{r grafico-boxplot-ano, fig.width=10, fig.height=5}
+ggplot(dados_gasto, aes(x = factor(ano), y = diff_abs, fill = factor(ano))) +
+  geom_boxplot(show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") + 
+  labs(title = "Distribuição da Diferença Absoluta por Ano", x = "Ano", y = "Diferença Absoluta (R$)") +
+  theme_light()
+```
+
+```{r grafico-ecdf-ano, fig.width=12, fig.height=9}
+dados_long_completo <- dados_gasto %>%
+  pivot_longer(
+    cols = c(SIOPE_CORR, SICONFI_CORR),
+    names_to = "Fonte",
+    values_to = "Gasto_por_Aluno"
+  )
+
+ggplot(dados_long_completo, aes(x = Gasto_por_Aluno, color = Fonte)) +
+  stat_ecdf(linewidth = 1) + 
+  facet_wrap(~ ano, ncol = 3) +
+  scale_color_manual(values = c("SIOPE_CORR" = "steelblue", "SICONFI_CORR" = "coral")) +
+  labs(
+    title = "Evolução da Comparação das Distribuições de Gasto (ECDF) por Ano",
+    x = "Gasto por Aluno (R$)",
+    y = "Proporção Cumulativa (0 a 1)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom", strip.text = element_text(face = "bold"))
+```
+
+## 5. Análise por Município (Top 20 Discrepâncias)
+
+Devido à quantidade expressiva de municípios na nova base do IDENE, selecionaremos os **20 municípios com maior discrepância absoluta média** para gerar os painéis visuais individuais, garantindo a legibilidade.
+
+```{r filtrar-top20}
+analise_municipio <- dados_gasto %>%
+  group_by(nom_munic) %>%
+  summarise(Media_Diff_Abs = mean(diff_abs, na.rm = TRUE),
+            Media_SIOPE = mean(SIOPE_CORR, na.rm = TRUE),
+            Media_SICONFI = mean(SICONFI_CORR, na.rm = TRUE))
+
+top20_municipios <- analise_municipio %>%
+  arrange(desc(abs(Media_Diff_Abs))) %>%
+  head(20) %>%
+  pull(nom_munic)
+
+dados_top20 <- dados_gasto %>% filter(nom_munic %in% top20_municipios)
+analise_municipio_top20 <- analise_municipio %>% filter(nom_munic %in% top20_municipios)
+```
+
+### 5.1. Gap Médio (Dumbbell Plot) para os Top 20
+
+```{r grafico-dumbbell-top20, fig.width=10, fig.height=8}
+ggplot(analise_municipio_top20, aes(y = fct_reorder(nom_munic, Media_SIOPE), 
+                             x = Media_SICONFI, xend = Media_SIOPE)) +
+  geom_segment(aes(yend = fct_reorder(nom_munic, Media_SIOPE)), 
+               color = "grey", linewidth = 1.5, alpha = 0.7) + 
+  geom_point(aes(color = "SICONFI"), size = 4) +
+  geom_point(aes(x = Media_SIOPE, color = "SIOPE"), size = 4) +
+  scale_color_manual(values = c("SIOPE" = "steelblue", "SICONFI" = "coral")) +
+  labs(title = "Gap Médio do Gasto por Aluno (Top 20 Discrepâncias)",
+       x = "Gasto Médio por Aluno (R$)", y = "Município", color = "Fonte") +
+  theme_bw() + theme(legend.position = "bottom")
+```
+
+### 5.2. Séries Temporais dos Gastos (Top 20)
+
+```{r grafico-facetado-municipio, fig.width=12, fig.height=9}
+dados_long_top20 <- dados_top20 %>%
+  pivot_longer(cols = c(SIOPE_CORR, SICONFI_CORR), names_to = "Fonte", values_to = "Gasto")
+
+ggplot(dados_long_top20, aes(x = ano, y = Gasto, color = Fonte, group = Fonte)) +
+  geom_line(linewidth = 1) + 
+  geom_point() +
+  geom_smooth(method = "lm", linetype = "dotted", se = FALSE, linewidth = 0.8) +
+  facet_wrap(~ nom_munic, scales = "free_y", ncol = 5) +
+  scale_color_manual(values = c("SIOPE_CORR" = "steelblue", "SICONFI_CORR" = "coral")) +
+  labs(title = "Gasto por Aluno (SIOPE vs SICONFI) - Top 20 Municípios", x = "Ano", y = "Gasto (R$)") +
+  theme_bw() + theme(legend.position = "bottom", strip.text = element_text(size = 7, face="bold"))
+```
+
+### 5.3. Evolução Global dos Gastos (Média e Mediana)
+
+```{r evolucao-media-mediana-global, fig.width=12, fig.height=6}
+# 1. Preparar os dados agregados (média e mediana) por ano para todos os municípios
+resumo_global_ano <- dados_gasto %>%
+  select(ano, SIOPE_CORR, SICONFI_CORR) %>%
+  pivot_longer(cols = c(SIOPE_CORR, SICONFI_CORR), names_to = "Fonte", values_to = "Gasto") %>%
+  group_by(ano, Fonte) %>%
+  summarise(
+    Media = mean(Gasto, na.rm = TRUE),
+    Mediana = median(Gasto, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2. Construir o gráfico da Média
+g_media <- ggplot(resumo_global_ano, aes(x = ano, y = Media, color = Fonte, group = Fonte)) +
+  geom_line(linewidth = 1) + 
+  geom_point(size = 2) +
+  geom_smooth(method = "lm", linetype = "dotted", se = FALSE, linewidth = 0.8) +
+  scale_color_manual(values = c("SIOPE_CORR" = "steelblue", "SICONFI_CORR" = "coral")) +
+  scale_x_continuous(breaks = unique(resumo_global_ano$ano)) + # Garante anos inteiros no eixo
+  labs(title = "Evolução da Média dos Gastos",
+       subtitle = "Todos os municípios analisados",
+       x = "Ano", 
+       y = "Gasto Médio (R$)") +
+  theme_bw() + 
+  theme(legend.position = "bottom")
+
+# 3. Construir o gráfico da Mediana
+g_mediana <- ggplot(resumo_global_ano, aes(x = ano, y = Mediana, color = Fonte, group = Fonte)) +
+  geom_line(linewidth = 1) + 
+  geom_point(size = 2) +
+  geom_smooth(method = "lm", linetype = "dotted", se = FALSE, linewidth = 0.8) +
+  scale_color_manual(values = c("SIOPE_CORR" = "steelblue", "SICONFI_CORR" = "coral")) +
+  scale_x_continuous(breaks = unique(resumo_global_ano$ano)) +
+  labs(title = "Evolução da Mediana dos Gastos",
+       subtitle = "Todos os municípios analisados",
+       x = "Ano", 
+       y = "Gasto Mediano (R$)") +
+  theme_bw() + 
+  theme(legend.position = "bottom")
+
+# 4. Exibir os gráficos lado a lado com patchwork
+g_media + g_mediana + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+```
+
+## 6. Indicadores Educacionais (SAEB, INSE, TDI)
+
+### 6.1. Desempenho no SAEB (Matemática e Português)
+
+Abaixo, a transformação e análise das notas de proficiência do SAEB do 5º ano.
+
+```{r saeb-analise, fig.width=10, fig.height=5}
+saeb_long <- dados_saeb %>%
+  pivot_longer(
+    cols = starts_with("SAEB"),
+    names_to = c("Ano", "Disciplina"),
+    names_pattern = "SAEB(\\d{2})_(.*)_5",
+    values_to = "Nota"
+  ) %>%
+  mutate(Ano = as.numeric(paste0("20", Ano)),
+         Disciplina = ifelse(Disciplina == "LP", "Língua Portuguesa", "Matemática"))
+
+saeb_resumo <- saeb_long %>%
+  group_by(Ano, Disciplina) %>%
+  summarise(Media_Nota = mean(Nota, na.rm = TRUE),
+            Mediana = median(Nota, na.rm = TRUE),
+            Desvio_Padrao = sd(Nota, na.rm = TRUE))
+
+kable(saeb_resumo, caption = "Desempenho Médio no SAEB (5º Ano) - IDENE", digits = 2) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+ggplot(saeb_long, aes(x = factor(Ano), y = Nota, fill = Disciplina)) +
+  geom_boxplot(alpha = 0.8) +
+  facet_wrap(~ Disciplina) +
+  labs(title = "Distribuição das Notas do SAEB por Ano (Língua Portuguesa e Matemática)", 
+       x = "Ano", y = "Nota Média (Escala SAEB)") +
+  theme_light() + theme(legend.position = "none")
+```
+
+### 6.2. Nível Socioeconômico (INSE)
+
+```{r inse-analise, fig.width=8, fig.height=4}
+inse_long <- dados_inse %>%
+  pivot_longer(cols = starts_with("MD_INSE_"), names_prefix = "MD_INSE_", 
+               names_to = "Ano", values_to = "INSE") %>%
+  mutate(Ano = as.numeric(Ano))
+
+inse_resumo <- inse_long %>%
+  group_by(Ano) %>%
+  summarise(Media_INSE = mean(INSE, na.rm = TRUE), 
+            Mediana_INSE = median(INSE, na.rm = TRUE),
+            SD_INSE = sd(INSE, na.rm = TRUE))
+
+kable(inse_resumo, caption = "Resumo Estatístico do INSE", digits = 2) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+ggplot(inse_long, aes(x = factor(Ano), y = INSE)) +
+  geom_violin(fill = "mediumseagreen", alpha = 0.6) +
+  geom_boxplot(width = 0.1, fill = "white") +
+  labs(title = "Distribuição do Indicador de Nível Socioeconômico (INSE)", 
+       x = "Ano", y = "Valor do INSE") +
+  theme_minimal()
+```
+
+### 6.3. Taxa de Distorção Idade-Série (TDI)
+
+A TDI afere o atraso escolar na região.
+
+```{r tdi-analise, fig.width=8, fig.height=4}
+tdi_resumo <- dados_tdi %>%
+  group_by(ano) %>%
+  summarise(Media_TDI = mean(TDI, na.rm = TRUE), 
+            Mediana_TDI = median(TDI, na.rm = TRUE),
+            Max_TDI = max(TDI, na.rm = TRUE))
+
+kable(tdi_resumo, caption = "Resumo da Taxa de Distorção Idade-Série (TDI %)", digits = 2) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+ggplot(dados_tdi, aes(x = factor(ano), y = TDI)) +
+  geom_boxplot(fill = "khaki", alpha = 0.7) +
+  labs(title = "Distribuição da Taxa de Distorção Idade-Série (TDI)", 
+       x = "Ano", y = "TDI (%)") +
+  theme_minimal()
+```

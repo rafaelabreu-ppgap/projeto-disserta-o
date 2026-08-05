@@ -212,7 +212,7 @@ class TesouroAPIConsumer:
             self.status_label.config(text="Processando dados...")
             
             # URL base da API
-            base_url = "https://apidatalake.tesouro.gov.br/ords/siconfi/tt//dca"
+            base_url = "https://apidatalake.tesouro.gov.br/ords/cdwhprd/siconfi/tt/dca"
             no_anexo = "DCA-Anexo I-E"
             
             for index, row in df.iterrows():
