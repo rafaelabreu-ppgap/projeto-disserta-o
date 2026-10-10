@@ -1,0 +1,42 @@
+cff-version: 1.2.0
+message: "Se você utilizar estes dados ou scripts, cite-os conforme os metadados abaixo."
+type: software
+title: "Projeto-disserta-o: bases de dados e scripts da dissertação de mestrado profissional em Administração Pública (PPGAP/UFVJM)"
+abstract: >-
+  Bases de dados, memória de cálculo e scripts em R e Python que reproduzem a
+  dissertação "Gasto público e desempenho escolar: evidências das redes públicas
+  municipais de ensino nos municípios na área de abrangência do IDENE-MG" e o
+  Produto Técnico-Tecnológico dela derivado. Inclui a coleta das declarações
+  DCA-Anexo I-E do SICONFI, a reconstrução do gasto por matrícula com rateio da
+  subfunção 12.122, a confrontação SIOPE x SICONFI, modelos de efeitos fixos de
+  duas vias, Análise Envoltória de Dados, Índice de Malmquist e segundo estágio
+  de Simar e Wilson.
+authors:
+  - given-names: "Rafael Junio"
+    family-names: "Abreu"
+    affiliation: "Universidade Federal dos Vales do Jequitinhonha e Mucuri"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+version: "1.0.0"
+date-released: "2026-10-10"
+license: MIT
+repository-code: "https://github.com/rafaelabreu-ppgap/projeto-disserta-o"
+keywords:
+  - gasto público em educação
+  - SIOPE
+  - SICONFI
+  - desempenho escolar
+  - análise envoltória de dados
+  - índice de Malmquist
+  - dados em painel
+  - IDENE
+references:
+  - type: thesis
+    title: "Gasto público e desempenho escolar: evidências das redes públicas municipais de ensino nos municípios na área de abrangência do IDENE-MG"
+    authors:
+      - given-names: "Rafael Junio"
+        family-names: "Abreu"
+    year: 2026
+    thesis-type: "Dissertação (Mestrado Profissional em Administração Pública)"
+    institution:
+      name: "Universidade Federal dos Vales do Jequitinhonha e Mucuri"
+      city: "Teófilo Otoni"
